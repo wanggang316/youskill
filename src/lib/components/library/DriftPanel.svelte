@@ -44,7 +44,7 @@
   );
 
   const buttonClass =
-    "border-base-300 text-base-content hover:bg-base-200 inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs transition disabled:opacity-50";
+    "border-base-300 text-base-content hover:bg-base-200 inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs transition disabled:opacity-50 aria-busy:disabled:opacity-100";
 
   // The parent only exposes a shared `busy` flag, so remember which button started the
   // action to show the spinner on that button alone.
