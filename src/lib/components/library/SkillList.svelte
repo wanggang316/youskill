@@ -9,7 +9,11 @@
   import type { HubSkillView } from "$lib/api/hub";
   import { groupLibrarySkills } from "$lib/library-groups";
   import { skillLabel } from "$lib/stores/hub";
-  import type { LibraryFilter, LibrarySource } from "$lib/navigation/app-shell";
+  import {
+    buildSettingsHref,
+    type LibraryFilter,
+    type LibrarySource,
+  } from "$lib/navigation/app-shell";
 
   let {
     skills = [],
@@ -227,6 +231,13 @@
       <p class="text-base-content-muted px-4 py-8 text-center text-xs">
         {totalCount === 0 ? $t("library.empty") : $t("library.emptyFiltered")}
       </p>
+      {#if totalCount === 0}
+        <p class="-mt-5 px-4 pb-8 text-center text-xs">
+          <a class="text-primary hover:underline" href={buildSettingsHref("backup")}>
+            {$t("library.restoreFromGithub")}
+          </a>
+        </p>
+      {/if}
     {:else}
       {#each groups as group (group.key)}
         {@const open = !collapsed.includes(group.key)}
