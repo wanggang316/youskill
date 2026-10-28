@@ -62,6 +62,7 @@ export * from "./github";
 export * from "./hub";
 export * from "./instructions";
 export * from "./library-sync";
+export * from "./search";
 export * from "./skills";
 export * from "./settings";
 export * from "./user-projects";

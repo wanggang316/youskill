@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Back up the library to a private GitHub repository with the account selected in Settings > GitHub, and restore it on another computer. Synced: skills, instruction templates, the agents each one is enabled for at user level, and custom agents; install paths, projects, settings and keys stay on each computer. After a pull, Settings lists the installs this computer is missing and applies the selected ones. A backup or pull that would need merging changes from both sides is refused without changing anything.
+- Global Search: press `Mod+P` (or the search button in the top bar) to find library skills by name, description or `SKILL.md` text, instruction templates by name or text, and projects by name or path, then open the result on its page. The shortcut can be changed in Settings > Shortcuts ([#42](https://github.com/wanggang316/you-skill/issues/42)).
 
 ### Changed
 

@@ -6,6 +6,7 @@ pub mod instructions;
 pub mod library_sync;
 pub mod remote;
 pub mod scan_roots;
+pub mod search;
 pub mod settings;
 pub mod skill;
 pub mod user_projects;

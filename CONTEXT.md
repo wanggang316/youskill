@@ -46,8 +46,9 @@ _Avoid_: Project root
 ### Navigation
 
 **Global Search**:
-One app-wide search, opened with a shortcut, that finds hub skills, instruction templates
-and projects by name or content and opens the selected one.
+One app-wide search, opened with a shortcut (`Mod+P` by default), that finds hub skills,
+instruction templates and projects (with the User scope) by name or content and opens the
+selected one on its own page. The UI calls it "Search" (搜索).
 _Avoid_: Quick Open, command palette
 
 **Filter**:

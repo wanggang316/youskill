@@ -8,12 +8,13 @@ pub const DEFAULT_TRANSLATE_DISPLAY_MODE: &str = TRANSLATE_DISPLAY_MODES[0];
 pub const TRANSLATE_TEXT_STYLES: [&str; 2] = ["none", "dashed_underline"];
 pub const DEFAULT_TRANSLATE_TEXT_STYLE: &str = TRANSLATE_TEXT_STYLES[0];
 /// Actions of the top bar that accept a keyboard shortcut.
-pub const SHORTCUT_ACTIONS: [&str; 6] = [
+pub const SHORTCUT_ACTIONS: [&str; 7] = [
   "library",
   "instructions",
   "projects",
   "market",
   "import",
+  "search",
   "settings",
 ];
 

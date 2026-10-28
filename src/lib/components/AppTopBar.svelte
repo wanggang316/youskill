@@ -7,6 +7,7 @@
     Loader2,
     Import,
     ScrollText,
+    Search,
     Settings,
     Store,
   } from "@lucide/svelte";
@@ -38,6 +39,7 @@
     latestVersion = "",
     onImport,
     onOpenLibrary,
+    onOpenSearch,
     onOpenUpdate,
   }: {
     activeKey: SidebarActiveKey;
@@ -46,6 +48,7 @@
     latestVersion?: string;
     onImport: () => void;
     onOpenLibrary: () => void;
+    onOpenSearch: () => void;
     onOpenUpdate: () => void;
   } = $props();
 
@@ -358,6 +361,25 @@
     <Tooltip.Root>
       <Tooltip.Trigger>
         {#snippet child({ props })}
+          <button
+            {...mergeProps(props, { onclick: onOpenSearch })}
+            class="text-base-content-muted hover:bg-base-content/[0.06] hover:text-base-content flex size-9 cursor-pointer items-center justify-center rounded-full transition-[background-color,color,transform] duration-200 active:scale-95"
+            type="button"
+            data-icon="search"
+            data-shortcut="search"
+            aria-label={$t("search.title")}
+            aria-keyshortcuts={ariaKeyShortcut($shortcuts.search)}
+          >
+            {#snippet icon()}<Search size={17} strokeWidth={1.7} />{/snippet}
+            {@render shortcutSlot("search", icon)}
+          </button>
+        {/snippet}
+      </Tooltip.Trigger>
+      {@render tooltipContent($t("search.title"), "search")}
+    </Tooltip.Root>
+    <Tooltip.Root>
+      <Tooltip.Trigger>
+        {#snippet child({ props })}
           <a
             {...props}
             class={`flex size-9 items-center justify-center rounded-full transition-[background-color,color,transform] duration-200 active:scale-95 ${
@@ -459,6 +481,14 @@
     /* Import: the arrow keeps dropping into the tray while hovered. */
     [data-icon="import"]:hover :global(svg > :nth-child(-n + 2)) {
       animation: nav-drop 900ms ease-in-out infinite;
+    }
+
+    /* Search: the lens tilts as if it looks closer. */
+    [data-icon="search"] :global(svg) {
+      transform-origin: 11px 11px;
+    }
+    [data-icon="search"]:hover :global(svg) {
+      transform: rotate(-12deg) scale(1.06);
     }
 
     /* Settings: the gear turns. */

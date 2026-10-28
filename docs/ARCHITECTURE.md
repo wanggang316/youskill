@@ -170,6 +170,22 @@ changed, `backup` and `pull` return `diverged` and write nothing. After a pull,
 library; `apply_pending` runs the selected ones through the normal install actions without
 force. Project installs are not synced.
 
+## Global Search
+
+`search_service::search(env, query, user_name)` searches hub skills (name, description,
+`SKILL.md` body without frontmatter), instruction templates (display name, body) and
+install scopes (the user scope and every registered project, by name and path). It finds
+each `SKILL.md` from the lock record (`skills/<id>/<name>`) and keys skill hits by id.
+Names match as a case-insensitive fuzzy subsequence, the other fields as a case-insensitive
+substring. Rank: exact name, name prefix, fuzzy name, description, path, body; equal
+ranks keep their order. Groups come as skills, instructions, projects, with at most eight
+hits each; empty groups are left out. A content hit carries a snippet of about 80
+characters; positions count characters, not bytes. Files are read on demand and cached by
+modification time and length, so a file edited outside the app is read again on the next
+search. There is no index and no file watcher. The `Mod+P` panel
+(`GlobalSearchModal.svelte`) calls `global_search` and opens a hit with the location
+helpers of `navigation/app-shell.ts`.
+
 ## Command surface
 
 | Area         | Commands                                                                                                                                                                                                                                                                                                                                                                                               |
@@ -179,6 +195,7 @@ force. Project installs are not synced.
 | Scan         | `scan_folder`, `import_scanned`                                                                                                                                                                                                                                                                                                                                                                        |
 | Instructions | `list_instructions`, `get_instruction`, `read_instruction`, `write_instruction`, `rename_instruction`, `import_instructions`, `create_instruction`, `detect_instruction_files`, `detect_instruction_github`, `install_instruction`, `uninstall_instruction`, `remove_instruction`, `sync_instruction`, `diff_instruction`, `list_instruction_files`, `read_instruction_file`, `write_instruction_file` |
 | Projects     | `list_user_projects`, `add_user_project`, `update_user_project`, `remove_user_project`, `list_workspaces`, `add_workspace`, `remove_workspace`, `scan_workspace`, `register_projects`, `list_memory_files`                                                                                                                                                                                             |
+| Search       | `global_search`                                                                                                                                                                                                                                                                                                                                                                                        |
 | Detection    | `detect_github_manual`, `detect_github_auto`, `detect_zip`, `detect_folder` (stage into a temp dir)                                                                                                                                                                                                                                                                                                    |
 | Other        | marketplace, agent apps, projects, settings, library sync, file readers, translation                                                                                                                                                                                                                                                                                                                   |
 

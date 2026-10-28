@@ -9,6 +9,7 @@
   import AppTopBar from "$lib/components/AppTopBar.svelte";
   import DiffModal from "$lib/components/DiffModal.svelte";
   import ForceConfirmModal from "$lib/components/ForceConfirmModal.svelte";
+  import GlobalSearchModal from "$lib/components/GlobalSearchModal.svelte";
   import ImportInstructionModal from "$lib/components/ImportInstructionModal.svelte";
   import ImportSkillModal from "$lib/components/ImportSkillModal.svelte";
   import InstallSkillModal from "$lib/components/InstallSkillModal.svelte";
@@ -28,7 +29,7 @@
     refreshHub,
   } from "$lib/stores/hub";
   import { refreshInstructions } from "$lib/stores/instructions";
-  import { openImportModal } from "$lib/stores/modals";
+  import { globalSearchOpen, openImportModal } from "$lib/stores/modals";
   import { loadSettings } from "$lib/stores/settings";
   import {
     ensureUpdateChecked,
@@ -167,6 +168,7 @@
       latestVersion={$updaterState.latestVersion}
       onImport={() => openImportModal()}
       onOpenLibrary={() => void checkAllSourceUpdates()}
+      onOpenSearch={() => globalSearchOpen.set(true)}
       onOpenUpdate={() => installAvailableUpdate().catch(console.error)}
     />
 
@@ -185,5 +187,6 @@
   <DiffModal />
   <WorkspaceModal />
   <ScanRootsModal />
+  <GlobalSearchModal />
   <UpdateDialog />
 </Tooltip.Provider>

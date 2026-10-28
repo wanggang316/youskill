@@ -12,6 +12,8 @@
     children?: import("svelte").Snippet;
     footer?: import("svelte").Snippet;
     containerClass?: string;
+    /** `top` keeps the dialog near the top, so it does not move while its content grows. */
+    placement?: "center" | "top";
   }
 
   let {
@@ -23,6 +25,7 @@
     children,
     footer,
     containerClass = "",
+    placement = "center",
   }: Props = $props();
   const resolvedContainerClass = $derived(containerClass || "max-w-[min(90vw,56rem)]");
 
@@ -54,7 +57,9 @@
 {#if open}
   <div
     bind:this={modalElement}
-    class="animate-backdrop fixed inset-0 z-(--z-modal) flex items-center justify-center p-4"
+    class={`animate-backdrop fixed inset-0 z-(--z-modal) flex justify-center p-4 ${
+      placement === "top" ? "items-start pt-[12vh]" : "items-center"
+    }`}
     style="background-color: var(--overlay);"
     class:animate-backdrop-close={closing}
     role="dialog"

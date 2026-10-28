@@ -152,6 +152,9 @@ export const forceModal = writable<ForceModalState>({
 
 export const scanRootsModal = writable<ScanRootsModalState>({ open: false });
 
+/** The Global Search panel. */
+export const globalSearchOpen = writable(false);
+
 export function openScanRootsModal(): void {
   scanRootsModal.set({ open: true });
 }

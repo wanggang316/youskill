@@ -8,6 +8,7 @@ export const SHORTCUT_ACTIONS = [
   "projects",
   "market",
   "import",
+  "search",
   "settings",
 ] as const;
 
@@ -26,6 +27,7 @@ export const DEFAULT_SHORTCUTS: Record<ShortcutAction, Binding> = {
   projects: "3",
   market: "m",
   import: "n",
+  search: "Mod+p",
   settings: "Mod+,",
 };
 
@@ -36,6 +38,7 @@ export const SHORTCUT_LABEL_KEYS: Record<ShortcutAction, string> = {
   projects: "sidebar.projects",
   market: "sidebar.market",
   import: "import.title",
+  search: "search.title",
   settings: "header.settings",
 };
 
