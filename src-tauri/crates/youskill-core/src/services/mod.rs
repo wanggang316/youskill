@@ -4,7 +4,6 @@
 pub mod agent_apps_service;
 pub mod ai_service;
 pub mod avatar_service;
-pub mod backup_service;
 pub mod diff_service;
 pub mod drift_service;
 pub mod env;
@@ -12,6 +11,7 @@ pub mod github_auth_service;
 pub mod hub_service;
 pub mod install_service;
 pub mod instruction_service;
+pub mod library_sync_service;
 pub mod lock_service;
 pub mod migration_service;
 pub mod remote_service;

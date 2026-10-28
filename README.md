@@ -24,7 +24,7 @@ YouSkill is a lightweight desktop app for managing [Agent Skills](https://agents
 - **Translation and bilingual reading.** Use LLM translation to read Skills in your preferred language alongside the original text.
 - **Built-in marketplace.** Browse Skills by category, import them with one click, and see which ones are already in your library.
 - **Terminal workflow.** Use the `youskill` CLI to import, install, inspect, and sync Skills and instructions, including from your Agent.
-- **Everyday essentials.** Back up your library and choose a theme or interface language.
+- **Everyday essentials.** Back up your library to a private GitHub repository and restore it on another computer, and choose a theme or interface language.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the storage layout and change tracking model,
 and [docs/CLI.md](docs/CLI.md) for the command line interface.

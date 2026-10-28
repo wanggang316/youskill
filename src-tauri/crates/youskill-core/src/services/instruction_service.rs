@@ -64,7 +64,7 @@ fn get_record(env: &Env, name: &str) -> Result<InstructionRecord, String> {
 
 /// Read-modify-write under the operation lock and a process-wide mutex; written through a
 /// temp file + rename.
-fn update_lock<T>(
+pub(crate) fn update_lock<T>(
   env: &Env,
   f: impl FnOnce(&mut InstructionLockFile) -> Result<T, String>,
 ) -> Result<T, String> {

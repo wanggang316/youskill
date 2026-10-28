@@ -3,6 +3,7 @@ pub mod cli;
 pub mod github;
 pub mod hub;
 pub mod instructions;
+pub mod library_sync;
 pub mod remote;
 pub mod scan_roots;
 pub mod settings;

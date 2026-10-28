@@ -3,7 +3,6 @@ use crate::config::{
   SHORTCUT_ACTIONS, TRANSLATE_DISPLAY_MODES, TRANSLATE_TEXT_STYLES,
 };
 use crate::services::ai_service::{self, OpenRouterModelOption};
-use crate::services::backup_service::{self, BackupResult};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
@@ -27,8 +26,6 @@ pub struct SettingsPayload {
   pub translate_text_style: String,
   #[serde(default)]
   pub shortcuts: BTreeMap<String, String>,
-  pub backup_folder: Option<String>,
-  pub last_backup_time: Option<String>,
 }
 
 fn default_translate_target_language() -> String {
@@ -89,8 +86,6 @@ pub fn get_settings() -> Result<SettingsPayload, String> {
       DEFAULT_TRANSLATE_TEXT_STYLE,
     ),
     shortcuts: normalize_shortcuts(&config.shortcuts),
-    backup_folder: config.backup_folder,
-    last_backup_time: config.last_backup_time,
   })
 }
 
@@ -145,27 +140,7 @@ pub fn update_settings(settings: SettingsPayload) -> Result<SettingsPayload, Str
       DEFAULT_TRANSLATE_TEXT_STYLE,
     ),
     shortcuts: normalize_shortcuts(&config.shortcuts),
-    backup_folder: config.backup_folder,
-    last_backup_time: config.last_backup_time,
   })
-}
-
-#[tauri::command]
-pub fn set_backup_folder(path: String) -> Result<Option<String>, String> {
-  let mut config = load_config()?;
-  config.backup_folder = Some(path);
-  save_config(&config)?;
-  Ok(config.backup_folder)
-}
-
-#[tauri::command]
-pub fn open_backup_folder(path: String) -> Result<(), String> {
-  backup_service::open_backup_folder(path)
-}
-
-#[tauri::command]
-pub async fn backup_skills(backup_folder: String) -> Result<BackupResult, String> {
-  backup_service::backup_skills(backup_folder).await
 }
 
 #[tauri::command]
@@ -220,10 +195,8 @@ mod tests {
 
   #[test]
   fn settings_payload_defaults_translate_view_options() {
-    let payload: SettingsPayload = serde_json::from_str(
-      r#"{"language":"en","theme":"system","sync_mode":"copy","backup_folder":null,"last_backup_time":null}"#,
-    )
-    .unwrap();
+    let payload: SettingsPayload =
+      serde_json::from_str(r#"{"language":"en","theme":"system","sync_mode":"copy"}"#).unwrap();
     assert_eq!(payload.translate_display_mode, "bilingual");
     assert_eq!(payload.translate_text_style, "none");
     assert!(payload.shortcuts.is_empty());

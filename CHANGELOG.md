@@ -9,13 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
+- The zip backup in Settings is replaced by GitHub backup. Existing `skills_backup_*.zip` files are left where they are.
+
 ### Added
 
+- Back up the library to a private GitHub repository with the account selected in Settings > GitHub, and restore it on another computer. Synced: skills, instruction templates, the agents each one is enabled for at user level, and custom agents; install paths, projects, settings and keys stay on each computer. After a pull, Settings lists the installs this computer is missing and applies the selected ones. A backup or pull that would need merging changes from both sides is refused without changing anything.
+
 ### Changed
+
+- Settings > Backup is now Backup & Sync.
 
 ### Fixed
 
 ### Removed
+
+- The zip backup to a local folder.
 
 ## [0.9.15] - 2026-10-24
 

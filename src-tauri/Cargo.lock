@@ -6656,12 +6656,14 @@ dependencies = [
 name = "youskill-core"
 version = "0.9.15"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "dirs-next",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha1",
  "sha2",
  "similar",
  "tempfile",
