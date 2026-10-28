@@ -6616,7 +6616,7 @@ dependencies = [
 
 [[package]]
 name = "you-skill"
-version = "0.9.15"
+version = "0.10.0"
 dependencies = [
  "image",
  "serde",
@@ -6636,7 +6636,7 @@ dependencies = [
 
 [[package]]
 name = "youskill-cli"
-version = "0.9.15"
+version = "0.10.0"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -6654,7 +6654,7 @@ dependencies = [
 
 [[package]]
 name = "youskill-core"
-version = "0.9.15"
+version = "0.10.0"
 dependencies = [
  "base64 0.22.1",
  "chrono",

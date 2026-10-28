@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
+### Added
+
+### Changed
+
+### Fixed
+
+### Removed
+
+## [0.10.0] - 2026-10-29
+
+### Breaking Changes
+
 - The zip backup in Settings is replaced by GitHub backup. Existing `skills_backup_*.zip` files are left where they are.
 
 ### Added
@@ -19,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - Settings > Backup is now Backup & Sync.
+- Drift actions in the Skill Library show a spinner on the button while they run ([HAN-270](https://linear.app/gumpw/issue/HAN-270)).
 
 ### Fixed
 
