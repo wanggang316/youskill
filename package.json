@@ -1,7 +1,7 @@
 {
   "name": "you-skill",
   "private": true,
-  "version": "0.9.12",
+  "version": "0.9.15",
   "type": "module",
   "scripts": {
     "dev": "vite dev",
@@ -12,6 +12,7 @@
     "check:frontend": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
     "check:backend": "cargo fmt --manifest-path src-tauri/Cargo.toml --all --check && cargo clippy --manifest-path src-tauri/Cargo.toml --workspace --all-targets -- -D warnings",
     "check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch",
+    "test:frontend": "node --test tests/*.test.mjs",
     "test": "cargo test --manifest-path src-tauri/Cargo.toml --workspace",
     "release": "bash ./scripts/release.sh",
     "tauri": "tauri",
@@ -21,6 +22,7 @@
     "format:check": "prettier --check \"**/*.{svelte,js,ts,css,scss,json}\""
   },
   "dependencies": {
+    "@iconify/svelte": "^5.2.3",
     "@lobehub/icons-static-svg": "1.94.0",
     "@lucide/svelte": "^0.563.1",
     "@sveltejs/kit": "^2.50.2",

@@ -9,6 +9,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Breaking Changes
 
+- The zip backup in Settings is replaced by GitHub backup. Existing `skills_backup_*.zip` files are left where they are.
+
+### Added
+
+- Back up the library to a private GitHub repository with the account selected in Settings > GitHub, and restore it on another computer. Synced: skills, instruction templates, the agents each one is enabled for at user level, and custom agents; install paths, projects, settings and keys stay on each computer. After a pull, Settings lists the installs this computer is missing and applies the selected ones. A backup or pull that would need merging changes from both sides is refused without changing anything.
+- Global Search: press `Mod+P` (or the search button in the top bar) to find library skills by name, description or `SKILL.md` text, instruction templates by name or text, and projects by name or path, then open the result on its page. The shortcut can be changed in Settings > Shortcuts ([#42](https://github.com/wanggang316/you-skill/issues/42)).
+
+### Changed
+
+- Settings > Backup is now Backup & Sync.
+
+### Fixed
+
+### Removed
+
+- The zip backup to a local folder.
+
+## [0.9.15] - 2026-10-24
+
+### Breaking Changes
+
+### Added
+
+- Instruction file groups in the Instructions list can be collapsed and expanded; the state is remembered ([HAN-261](https://linear.app/gumpw/issue/HAN-261)).
+- Workspace groups in the "Install to" location picker can be collapsed and expanded; the state is remembered ([HAN-262](https://linear.app/gumpw/issue/HAN-262)).
+
+### Changed
+
+- Opening a skill in Market shows its detail in the content panel and keeps the category and repository list visible ([HAN-260](https://linear.app/gumpw/issue/HAN-260)).
+
+### Fixed
+
+- The update dialog hides release note sections that have no entries ([HAN-256](https://linear.app/gumpw/issue/HAN-256)).
+
+### Removed
+
+## [0.9.14] - 2026-10-22
+
+### Breaking Changes
+
+### Added
+
+### Changed
+
+### Fixed
+
+- Recover empty skill names from existing hub directories so the library can display and read skills after an upgrade, without changing their ids or install history.
+
+### Removed
+
+## [0.9.13] - 2026-10-21
+
+### Breaking Changes
+
 - The library keys each skill by an id and stores it at `~/.youskill/skills/<id>/<name>` (lock file version 2). The first start moves the library and relinks symlink installs. An earlier version cannot read the new layout.
 - The CLI `--json` output and the command line arguments use the new skill id: `list`, `show`, `import` and `update` report it, and every skill argument accepts an id, a source key or a unique name.
 
@@ -17,14 +71,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Skills with the same name from different sources can be in the library together. Each one can be installed into a different place; an install into a directory that holds the other one asks before it replaces it.
 - The import dialog shows library skills with the same name or source, and lets you replace one of them or add the import as a new skill. A zip import replaces the newest zip skill of the same name by default.
 - `youskill import --replace <skill>` and `--add`; skill arguments accept source keys such as `owner/repo@main:tdd`.
-- Global Search: press `Mod+P` (or the search button in the top bar) to find library skills by name, description or `SKILL.md` text, instruction templates by name or text, and projects by name or path, then open the result on its page. The shortcut can be changed in Settings > Shortcuts ([#42](https://github.com/wanggang316/you-skill/issues/42)).
 
 ### Changed
+
+- Marketplace shows stars beside category result sources and in the hot repository header. Repository results omit the repeated source, and sorting uses an icon menu.
+
+- Marketplace has category and hot repository navigation beside a scoped skill list. Search, sort, results, and scroll position are restored after viewing a skill.
 
 - An import of a GitHub folder or local folder that is already in the library always updates that skill. The branch is part of a GitHub source, so a skill from another branch is a separate skill.
 - The list column on the left of each page runs to the bottom edge of the window. Content panels keep their gap above the edge ([HAN-252](https://linear.app/gumpw/issue/HAN-252)).
 
 ### Fixed
+
+- Marketplace tabs use a translucent sidebar track instead of an opaque panel background.
+
+- Marketplace navigation uses the same hover and selection colors as the other sidebars and displays category and hot repository icons from the catalog.
+
+- Category navigation works with older catalog servers that do not yet provide the tag summary endpoint.
+
+- Marketplace details use the server skill id to distinguish entries with the same name. Pagination no longer stops one page early.
 
 ### Removed
 

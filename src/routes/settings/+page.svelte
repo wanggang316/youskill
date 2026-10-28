@@ -2,7 +2,7 @@
   import type { Component } from "svelte";
   import { page } from "$app/state";
   import {
-    Archive,
+    CloudUpload,
     Bot,
     Github,
     Info,
@@ -13,10 +13,10 @@
   } from "@lucide/svelte";
   import AboutSection from "$lib/components/settings/AboutSection.svelte";
   import AgentAppsSection from "$lib/components/settings/AgentAppsSection.svelte";
-  import BackupSection from "$lib/components/settings/BackupSection.svelte";
   import CliSection from "$lib/components/settings/CliSection.svelte";
   import GeneralSection from "$lib/components/settings/GeneralSection.svelte";
   import GithubSection from "$lib/components/settings/GithubSection.svelte";
+  import LibrarySyncSection from "$lib/components/settings/LibrarySyncSection.svelte";
   import ShortcutsSection from "$lib/components/settings/ShortcutsSection.svelte";
   import TranslationSection from "$lib/components/settings/TranslationSection.svelte";
   import { t } from "$lib/i18n";
@@ -34,7 +34,7 @@
       { key: "agents", label: $t("agentApps.title"), icon: Bot },
       { key: "translation", label: $t("settings.translation.title"), icon: Languages },
       { key: "github", label: $t("settings.github.title"), icon: Github },
-      { key: "backup", label: $t("settings.section.backup"), icon: Archive },
+      { key: "backup", label: $t("settings.section.backup"), icon: CloudUpload },
       { key: "shortcuts", label: $t("settings.shortcuts.title"), icon: Keyboard },
       { key: "cli", label: $t("settings.cli.title"), icon: SquareTerminal },
       { key: "about", label: $t("settings.section.about"), icon: Info },
@@ -81,7 +81,7 @@
         {:else if section === "github"}
           <GithubSection />
         {:else if section === "backup"}
-          <BackupSection />
+          <LibrarySyncSection />
         {:else if section === "shortcuts"}
           <ShortcutsSection />
         {:else if section === "cli"}

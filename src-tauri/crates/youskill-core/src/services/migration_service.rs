@@ -460,7 +460,7 @@ fn import_into_hub(
 /// an interrupted run continues on the next call: a hub copy that was moved before the
 /// lock was written is found at `skills/<id>/<name>` and keeps that id.
 pub fn migrate_skill_ids(env: &Env) -> Result<(), String> {
-  if !has_named_records(env)? {
+  if !needs_id_repair(env)? {
     return Ok(());
   }
   let _ops = ops_guard_unless_held(&env.youskill_root)?;
@@ -468,18 +468,30 @@ pub fn migrate_skill_ids(env: &Env) -> Result<(), String> {
   for (key, record) in &lock.skills {
     if !is_skill_id(key) {
       migrate_named_record(env, key, record)?;
+    } else if record.name.is_empty() {
+      // Recover only from a unique directory; keep the recorded hash and install history.
+      if let Some(name) =
+        skill_dir_in(&env.hub_root.join(key)).filter(|name| validate_skill_name(name).is_ok())
+      {
+        store(env).update(|lock| {
+          if let Some(record) = lock.skills.get_mut(key) {
+            record.name = name;
+          }
+          Ok(())
+        })?;
+      }
     }
   }
   Ok(())
 }
 
-fn has_named_records(env: &Env) -> Result<bool, String> {
+fn needs_id_repair(env: &Env) -> Result<bool, String> {
   Ok(
     store(env)
       .read()?
       .skills
-      .keys()
-      .any(|key| !is_skill_id(key)),
+      .iter()
+      .any(|(key, record)| !is_skill_id(key) || record.name.is_empty()),
   )
 }
 
@@ -820,6 +832,66 @@ mod tests {
       .installs
       .iter()
       .all(|install| install.state == TargetState::InSync));
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn id_records_with_empty_names_recover_without_changing_identity_or_installs() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = v1_hub(tmp.path());
+    migrate_skill_ids(&env).unwrap();
+    let expected = store(&env).read().unwrap();
+    let id = expected.skills.keys().next().unwrap();
+    store(&env)
+      .update(|lock| {
+        lock.skills.get_mut(id).unwrap().name.clear();
+        Ok(())
+      })
+      .unwrap();
+
+    let view = get_hub_skill(&env, id).unwrap().unwrap();
+    assert_eq!(view.name, "foo");
+    assert_eq!(view.hub_state, crate::models::HubState::Ok);
+    assert!(view
+      .installs
+      .iter()
+      .all(|install| install.state == TargetState::InSync));
+    assert_eq!(store(&env).read().unwrap(), expected);
+    migrate_skill_ids(&env).unwrap();
+    assert_eq!(store(&env).read().unwrap(), expected);
+  }
+
+  #[test]
+  fn empty_names_are_not_guessed_when_the_hub_is_missing_or_ambiguous() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = Env::for_test(tmp.path(), vec![], vec![]);
+    let id = new_skill_id();
+    write(
+      &env.youskill_root,
+      ".skill-lock.json",
+      &serde_json::json!({
+        "version": 2,
+        "skills": { id.clone(): {
+          "name": "", "hash": "h", "importedAt": "t", "updatedAt": "t"
+        }}
+      })
+      .to_string(),
+    );
+    let before = fs::read(&env.lock_path).unwrap();
+    migrate_skill_ids(&env).unwrap();
+    assert_eq!(fs::read(&env.lock_path).unwrap(), before);
+    write(
+      &env.hub_dir(&id, "foo"),
+      "SKILL.md",
+      "---\nname: foo\n---\nF",
+    );
+    write(
+      &env.hub_dir(&id, "bar"),
+      "SKILL.md",
+      "---\nname: bar\n---\nB",
+    );
+    migrate_skill_ids(&env).unwrap();
+    assert_eq!(fs::read(&env.lock_path).unwrap(), before);
   }
 
   #[test]

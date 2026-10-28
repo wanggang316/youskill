@@ -7,7 +7,7 @@
   import Modal from "$lib/components/ui/Modal.svelte";
   import { t } from "$lib/i18n";
   import { installAvailableUpdate, updateDialogOpen, updaterState } from "$lib/stores/updater";
-  import { renderMarkdown } from "$lib/utils/markdown";
+  import { removeEmptySections, renderMarkdown } from "$lib/utils/markdown";
 
   /**
    * Follows the Sparkle windows on macOS: progress and update windows have a
@@ -28,7 +28,8 @@
     return "upToDate";
   });
   const isAlert = $derived(view === "upToDate" || view === "error");
-  const releaseNotes = $derived(renderMarkdown($updaterState.releaseNotes));
+  // Published releases can keep changelog categories without entries.
+  const releaseNotes = $derived(renderMarkdown(removeEmptySections($updaterState.releaseNotes)));
   const progress = $derived(
     $updaterState.contentLength > 0
       ? Math.min(100, ($updaterState.downloaded / $updaterState.contentLength) * 100)

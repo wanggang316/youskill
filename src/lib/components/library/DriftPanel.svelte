@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { AlertTriangle } from "@lucide/svelte";
+  import { AlertTriangle, Loader2 } from "@lucide/svelte";
   import SymlinkMarker from "$lib/components/SymlinkMarker.svelte";
   import { t } from "$lib/i18n";
   import { openDiffModal, type LibraryKind } from "$lib/stores/modals";
@@ -44,7 +44,25 @@
   );
 
   const buttonClass =
-    "border-base-300 text-base-content hover:bg-base-200 rounded-lg border px-2.5 py-1 text-xs transition disabled:opacity-50";
+    "border-base-300 text-base-content hover:bg-base-200 inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1 text-xs transition disabled:opacity-50 aria-busy:disabled:opacity-100";
+
+  // The parent only exposes a shared `busy` flag, so remember which button started the
+  // action to show the spinner on that button alone.
+  let pendingKey = $state<string | null>(null);
+  $effect(() => {
+    if (!busy) pendingKey = null;
+  });
+  const isPending = (key: string) => busy && pendingKey === key;
+
+  function sync(key: string, action: SyncAction) {
+    pendingKey = key;
+    onSync(action);
+  }
+
+  function targetAction(install: InstallView, action: TargetAction) {
+    pendingKey = `${action}:${install.path}`;
+    onTargetAction(install, action);
+  }
 
   const needsReinstall = (install: InstallView) =>
     install.state === "missing" || install.state === "broken_link";
@@ -69,8 +87,10 @@
             class={buttonClass}
             type="button"
             disabled={busy}
-            onclick={() => onSync({ kind: "accept_hub" })}
+            aria-busy={isPending("accept_hub")}
+            onclick={() => sync("accept_hub", { kind: "accept_hub" })}
           >
+            {#if isPending("accept_hub")}<Loader2 size={12} class="animate-spin" />{/if}
             {$t("drift.acceptHub")}
           </button>
         {/if}
@@ -79,8 +99,10 @@
             class={buttonClass}
             type="button"
             disabled={busy}
-            onclick={() => onSync({ kind: "pull_source" })}
+            aria-busy={isPending("pull_source")}
+            onclick={() => sync("pull_source", { kind: "pull_source" })}
           >
+            {#if isPending("pull_source")}<Loader2 size={12} class="animate-spin" />{/if}
             {$t("drift.pullSource")}
           </button>
         {/if}
@@ -110,8 +132,10 @@
             class={buttonClass}
             type="button"
             disabled={busy}
-            onclick={() => onSync({ kind: "pull_source" })}
+            aria-busy={isPending("pull_source")}
+            onclick={() => sync("pull_source", { kind: "pull_source" })}
           >
+            {#if isPending("pull_source")}<Loader2 size={12} class="animate-spin" />{/if}
             {$t("drift.pullSource")}
           </button>
         {/if}
@@ -120,8 +144,10 @@
             class={buttonClass}
             type="button"
             disabled={busy}
-            onclick={() => onSync({ kind: "push_source" })}
+            aria-busy={isPending("push_source")}
+            onclick={() => sync("push_source", { kind: "push_source" })}
           >
+            {#if isPending("push_source")}<Loader2 size={12} class="animate-spin" />{/if}
             {$t("drift.pushSource")}
           </button>
         {/if}
@@ -155,20 +181,30 @@
                 class={buttonClass}
                 type="button"
                 disabled={busy}
-                onclick={() => onTargetAction(install, "adopt")}
+                aria-busy={isPending(`adopt:${install.path}`)}
+                onclick={() => targetAction(install, "adopt")}
               >
+                {#if isPending(`adopt:${install.path}`)}<Loader2
+                    size={12}
+                    class="animate-spin"
+                  />{/if}
                 {$t("target.adopt")}
               </button>
             {/if}
             {#if install.mode === "copy" || needsReinstall(install)}
+              {@const action = needsReinstall(install) ? "reinstall" : "push"}
               <button
                 class={buttonClass}
                 type="button"
                 disabled={busy}
-                onclick={() =>
-                  onTargetAction(install, needsReinstall(install) ? "reinstall" : "push")}
+                aria-busy={isPending(`${action}:${install.path}`)}
+                onclick={() => targetAction(install, action)}
               >
-                {needsReinstall(install) ? $t("target.reinstall") : $t("target.push")}
+                {#if isPending(`${action}:${install.path}`)}<Loader2
+                    size={12}
+                    class="animate-spin"
+                  />{/if}
+                {action === "reinstall" ? $t("target.reinstall") : $t("target.push")}
               </button>
             {/if}
           </div>
@@ -181,8 +217,10 @@
           class={buttonClass}
           type="button"
           disabled={busy}
-          onclick={() => onSync({ kind: "push_targets" })}
+          aria-busy={isPending("push_targets")}
+          onclick={() => sync("push_targets", { kind: "push_targets" })}
         >
+          {#if isPending("push_targets")}<Loader2 size={12} class="animate-spin" />{/if}
           {$t("drift.pushAll")}
         </button>
       </div>

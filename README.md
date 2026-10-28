@@ -6,34 +6,48 @@
 
 English | [中文](README_ZH.md)
 
-YouSkill is a desktop [Agent Skills](https://agentskills.io/) manager that helps you organize all skills on your machine in one place. It is lightweight and fast, and aims to make skill management clear, visual, and maintainable.
+**Your partner for managing Agent assets.**
 
-## Why This Project
+YouSkill is a lightweight desktop app for managing [Agent Skills](https://agentskills.io/) and instruction files across your Agents and projects. Keep them in one central library, track changes at each install location, and choose which version to keep. Built with Tauri for a fast, lightweight experience.
 
-1. Most users work with multiple agent apps (Codex, Claude Code, Cursor, OpenCode, TRAE, etc.), but their skill systems are isolated and managed differently.
-2. Installing, updating, and removing skills often means manual copying, syncing, and cleanup across many folders.
-3. For non-technical users, manual installation or CLI-only workflows are still too complex.
-4. High-quality skills are fragmented across sources, making discovery and reuse inefficient.
+## Manage the Entire Skill Lifecycle
+
+1. **Import once.** Browse the built-in marketplace, paste a GitHub URL, or choose a `.zip` / `.skill` archive or local folder.
+2. **Install where you need it.** Choose user level or a project, select your Agents, and install by copy or symlink. Use built-in Agents such as Claude Code, Codex, Cursor, and OpenCode, or add a custom Agent by its Skill directory.
+3. **Track every copy.** See which Skills are installed in each project and Agent. Identify outdated copies, local edits, and conflicts before you sync.
+4. **Choose what to update.** Check the source for updates, view local differences, then adopt a local copy into the library or push the library version to your targets.
 
 ## Features
 
-1. A central skill library at `~/.youskill/skills`: every skill is imported once and tracked by a single lock file (`~/.youskill/.skill-lock.json`).
-2. Two-step workflow: import (marketplace, GitHub URL, `.zip` / `.skill` archives, local folders) and install (to user-level or project-level directories of 40+ developer tools, plus custom agent apps), by copy or symlink.
-3. Install matrix per skill: see at a glance which projects and which agents a skill is installed to.
-4. Change tracking: each install keeps the hub version it was written from, so the app can tell outdated, locally modified and conflicting copies apart and lets you choose the sync direction (update from source, push to targets, adopt a local copy).
-5. Folder scanning: scan a project or an agent's skills directory and sync what it finds into the library.
-6. Built-in dynamic skill marketplace (15,000+) with update checks against the source repository.
-7. Compatible with the `.agents/skills` shared directory convention (the "Agents (shared)" target).
-8. One-click backup of the whole library, multi-theme and multilingual UI.
+- **One central library.** Organize Skills by source, inspect their files, and see their versions and install locations. Scan existing Agent or project folders to bring Skills into the library.
+- **Shared instructions.** Manage `AGENTS.md` and `CLAUDE.md` templates in one place and apply them across Agents and projects.
+- **Translation and bilingual reading.** Use LLM translation to read Skills in your preferred language alongside the original text.
+- **Built-in marketplace.** Browse Skills by category, import them with one click, and see which ones are already in your library.
+- **Terminal workflow.** Use the `youskill` CLI to import, install, inspect, and sync Skills and instructions, including from your Agent.
+- **Everyday essentials.** Back up your library to a private GitHub repository and restore it on another computer, and choose a theme or interface language.
 
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the storage layout, lock file and drift model,
-and [docs/CLI.md](docs/CLI.md) for the `youskill` command line interface.
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the storage layout and change tracking model,
+and [docs/CLI.md](docs/CLI.md) for the command line interface.
 
 ## Preview
 
-![main](./public/01.png)
-![install](./public/02.png)
-![settings](./public/03.png)
+### Skill Library
+
+Browse Skills by source and inspect their versions, files, and install locations.
+
+![Skill library with source groups, version details, and install locations](./public/shot-skills.webp)
+
+### Instructions
+
+Manage reusable instruction templates and see the Agents and projects that use them.
+
+![Instruction templates and their installed AGENTS.md and CLAUDE.md files](./public/shot-instructions.webp)
+
+### Projects
+
+See each project's Agents, instruction files, and installed Skills in one place.
+
+![Project overview with Agents, instruction files, and installed Skills](./public/shot-projects.webp)
 
 ## Download
 

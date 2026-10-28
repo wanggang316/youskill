@@ -14,6 +14,8 @@ Code is the source of truth; when this document and the code disagree, fix the d
   instructions/<id>.md    # instruction templates: one Markdown file per template
   .instruction-lock.json  # registry of template names, hashes and install targets
   .trash/<name>-<stamp>/  # previous hub copy before a replacement (swept after 7 days)
+  .sync-state.json       # library sync: repository, last synced commit and its files (local only)
+  .sync-staging/          # pulled skills assembled before they move into the hub
 
 <config_dir>/youskill/    # app config, custom agent apps, registered projects (unchanged)
 ```
@@ -148,6 +150,26 @@ from before ids (keyed by a generated name, with every agent file copied in) are
 on the first listing: a record that only mirrored one agent file is dropped again, the
 rest get an id and keep their key as name. Everything lives in `instruction_service`.
 
+## Library sync (`library_sync_service`)
+
+The library is backed up to a private GitHub repository through the GitHub REST API (Git
+Data API, no local clone), with the token of the account selected in Settings > GitHub
+(`gh`). The repository holds `library.json` (per skill and instruction: name, source
+without update-check fields, hash, timestamps, and `agents`, the user-level agent ids it is
+enabled for), `agents.json` (custom agents), `skills/<id>/<name>/` and
+`instructions/<id>.md`. No absolute path is written. The lock files stay the source of
+truth: a backup exports a snapshot and commits it on top of the branch, a pull writes the
+branch back into the hub and lock files.
+
+`.sync-state.json` records the last synced commit, its files and `library.json`, and the
+user-level agents installed at that point. A snapshot's `agents` is the base value plus
+this computer's install changes since then, so agents this computer does not have stay
+enabled. Both directions only fast-forward from the last synced commit; when both sides
+changed, `backup` and `pull` return `diverged` and write nothing. After a pull,
+`pending` lists user-level installs, uninstalls and copy updates that would match the
+library; `apply_pending` runs the selected ones through the normal install actions without
+force. Project installs are not synced.
+
 ## Global Search
 
 `search_service::search(env, query, user_name)` searches hub skills (name, description,
@@ -175,7 +197,7 @@ helpers of `navigation/app-shell.ts`.
 | Projects     | `list_user_projects`, `add_user_project`, `update_user_project`, `remove_user_project`, `list_workspaces`, `add_workspace`, `remove_workspace`, `scan_workspace`, `register_projects`, `list_memory_files`                                                                                                                                                                                             |
 | Search       | `global_search`                                                                                                                                                                                                                                                                                                                                                                                        |
 | Detection    | `detect_github_manual`, `detect_github_auto`, `detect_zip`, `detect_folder` (stage into a temp dir)                                                                                                                                                                                                                                                                                                    |
-| Other        | marketplace, agent apps, projects, settings, backup, file readers, translation                                                                                                                                                                                                                                                                                                                         |
+| Other        | marketplace, agent apps, projects, settings, library sync, file readers, translation                                                                                                                                                                                                                                                                                                                   |
 
 Services live in the `youskill-core` crate (`src-tauri/crates/youskill-core`), which the
 Tauri app and the `youskill` CLI (see [CLI.md](CLI.md)) both depend on; the app's

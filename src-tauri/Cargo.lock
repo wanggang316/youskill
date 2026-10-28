@@ -6616,7 +6616,7 @@ dependencies = [
 
 [[package]]
 name = "you-skill"
-version = "0.9.12"
+version = "0.9.15"
 dependencies = [
  "image",
  "serde",
@@ -6636,7 +6636,7 @@ dependencies = [
 
 [[package]]
 name = "youskill-cli"
-version = "0.9.12"
+version = "0.9.15"
 dependencies = [
  "assert_cmd",
  "clap",
@@ -6654,14 +6654,16 @@ dependencies = [
 
 [[package]]
 name = "youskill-core"
-version = "0.9.12"
+version = "0.9.15"
 dependencies = [
+ "base64 0.22.1",
  "chrono",
  "dirs-next",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
  "serde_yaml",
+ "sha1",
  "sha2",
  "similar",
  "tempfile",

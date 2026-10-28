@@ -42,8 +42,7 @@ const LIBRARY_SOURCES: LibrarySource[] = ["all", "local", "github", "none"];
 const isSettingsPath = (pathname: string) =>
   pathname === "/settings" || pathname.startsWith("/settings/");
 
-const isMarketPath = (pathname: string) =>
-  pathname === "/market" || pathname.startsWith("/skills/remote/");
+const isMarketPath = (pathname: string) => pathname === "/market";
 
 const isProjectsPath = (pathname: string) => pathname.startsWith("/projects");
 
@@ -117,7 +116,9 @@ export const buildScopeHref = (scope?: ScopeRef | null): string => {
   return `/projects?project=${encodeURIComponent(scope.projectPath ?? "")}`;
 };
 
-export const buildMarketHref = (): string => "/market";
+/** The market page, optionally with one marketplace skill open in the content panel. */
+export const buildMarketHref = (skillId?: string | null): string =>
+  skillId ? `/market?skill=${encodeURIComponent(skillId)}` : "/market";
 
 export const parseSettingsSection = (value: string | null): SettingsSection =>
   SETTINGS_SECTIONS.includes(value as SettingsSection) ? (value as SettingsSection) : "general";

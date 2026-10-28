@@ -150,6 +150,40 @@ export function renderMarkdown(content: string | undefined | null): string {
   return typeof result === "string" ? result : "";
 }
 
+function withoutEmptySections(tokens: Token[]): Token[] {
+  const result: Token[] = [];
+  let index = 0;
+  while (index < tokens.length) {
+    const token = tokens[index];
+    if (token.type !== "heading") {
+      result.push(token);
+      index += 1;
+      continue;
+    }
+    const depth = (token as Tokens.Heading).depth;
+    let end = index + 1;
+    while (
+      end < tokens.length &&
+      !(tokens[end].type === "heading" && (tokens[end] as Tokens.Heading).depth <= depth)
+    ) {
+      end += 1;
+    }
+    const body = withoutEmptySections(tokens.slice(index + 1, end));
+    if (body.some((child) => child.type !== "space")) result.push(token, ...body);
+    index = end;
+  }
+  return result;
+}
+
+/** Removes headings that have no content below them, e.g. empty changelog categories. */
+export function removeEmptySections(content: string | undefined | null): string {
+  if (!content) return "";
+  return withoutEmptySections(markedRenderer.lexer(content))
+    .map((token) => token.raw)
+    .join("")
+    .trim();
+}
+
 // Blocks that the translation keeps as-is, so bilingual view shows them once.
 const UNTRANSLATED_BLOCK_TYPES = new Set(["code", "hr", "html", "def"]);
 

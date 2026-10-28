@@ -12,12 +12,14 @@
     value = "",
     onChange = () => {},
     fullWidth = false,
+    surface = "panel",
     className = "",
   } = $props<{
     items?: SegmentedTabItem[];
     value?: string;
     onChange?: (value: string) => void;
     fullWidth?: boolean;
+    surface?: "panel" | "sidebar";
     className?: string;
   }>();
 
@@ -50,9 +52,12 @@
   });
 </script>
 
-<div bind:this={track} class={`bg-base-200 relative flex gap-2 rounded-full p-1 ${className}`}>
+<div
+  bind:this={track}
+  class={`${surface === "sidebar" ? "bg-base-content/[0.05]" : "bg-base-200"} relative flex gap-2 rounded-full p-1 ${className}`}
+>
   <span
-    class={`bg-base-100 absolute top-1 bottom-1 left-0 rounded-full shadow-sm ${
+    class={`${surface === "sidebar" ? "bg-raised" : "bg-base-100"} absolute top-1 bottom-1 left-0 rounded-full shadow-sm ${
       animate
         ? "transition-[transform,width,opacity] duration-300 ease-[cubic-bezier(0.32,0.72,0,1)] motion-reduce:transition-none"
         : ""

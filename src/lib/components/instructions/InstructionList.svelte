@@ -1,5 +1,6 @@
 <script lang="ts">
-  import { Folder, Loader2, Plus, RefreshCw, Search, UserRound } from "@lucide/svelte";
+  import { untrack } from "svelte";
+  import { ChevronRight, Folder, Loader2, Plus, RefreshCw, Search, UserRound } from "@lucide/svelte";
   import ReferenceMarker from "$lib/components/ReferenceMarker.svelte";
   import SymlinkMarker from "$lib/components/SymlinkMarker.svelte";
   import IconButton from "$lib/components/ui/IconButton.svelte";
@@ -63,6 +64,42 @@
       group.files.push(file);
     }
     return groups;
+  });
+
+  /** Collapsed file group keys, remembered per machine. */
+  const COLLAPSED_STORAGE_KEY = "youskill.collapsedInstructionFileGroups";
+
+  const readCollapsed = (): string[] => {
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem(COLLAPSED_STORAGE_KEY) ?? "[]");
+      return Array.isArray(parsed) ? parsed.filter((key) => typeof key === "string") : [];
+    } catch {
+      return [];
+    }
+  };
+
+  let collapsed = $state<string[]>(readCollapsed());
+
+  function setCollapsed(keys: string[]) {
+    collapsed = keys;
+    try {
+      localStorage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify(keys));
+    } catch {
+      // Remembering the state is best effort.
+    }
+  }
+
+  const toggleGroup = (key: string) =>
+    setCollapsed(
+      collapsed.includes(key) ? collapsed.filter((item) => item !== key) : [...collapsed, key]
+    );
+
+  // Selecting a file elsewhere (deep links, installs) must not land in a hidden row.
+  $effect(() => {
+    const group = fileGroups.find((item) => item.files.some((file) => file.path === selectedFile));
+    if (!group) return;
+    const current = untrack(() => collapsed);
+    if (current.includes(group.key)) setCollapsed(current.filter((key) => key !== group.key));
   });
 
   const rowClass = (selected: boolean) =>
@@ -180,45 +217,53 @@
         </p>
       {/if}
       {#each fileGroups as group (group.key)}
-        <p
-          class="text-base-content-muted flex items-center gap-1.5 px-4 pt-1.5 pb-1 text-[11px]"
+        {@const open = !collapsed.includes(group.key)}
+        <button
+          class="text-base-content-muted hover:text-base-content flex w-full items-center gap-1.5 px-4 pt-1.5 pb-1 text-left text-[11px] transition"
+          type="button"
+          onclick={() => toggleGroup(group.key)}
+          aria-expanded={open}
           title={group.path ?? undefined}
         >
+          <ChevronRight size={12} class={`shrink-0 transition ${open ? "rotate-90" : ""}`} />
           {#if group.path}
             <Folder size={11} class="shrink-0" />
           {:else}
             <UserRound size={11} class="shrink-0" />
           {/if}
-          <span class="truncate">{group.label}</span>
-        </p>
-        {#each group.files as file (file.path)}
-          {@const selected = file.path === selectedFile}
-          <button
-            class={rowClass(selected)}
-            type="button"
-            onclick={() => onSelectFile(file.path)}
-            aria-current={selected ? "true" : undefined}
-            title={file.path}
-          >
-            <!-- Icon (11px) + gap (6px): puts the file name under the group label. -->
-            <div class="flex w-full items-center gap-2 pl-[1.0625rem]">
-              <span class="text-base-content min-w-0 flex-1 truncate font-mono text-[12px]">
-                {file.fileName}
-              </span>
-              <SymlinkMarker target={file.linkTarget} />
-              <ReferenceMarker references={file.references} />
-              {#if file.template}
-                {#if file.template.state !== "in_sync"}
-                  <span class="tag tag-warning shrink-0">{$t("library.tag.changed")}</span>
-                {:else}
-                  <span class="tag tag-neutral max-w-24 shrink-0 truncate"
-                    >{file.template.name}</span
-                  >
+          <span class="min-w-0 flex-1 truncate">{group.label}</span>
+          <span class="text-base-content-faint shrink-0">{group.files.length}</span>
+        </button>
+        {#if open}
+          {#each group.files as file (file.path)}
+            {@const selected = file.path === selectedFile}
+            <button
+              class={rowClass(selected)}
+              type="button"
+              onclick={() => onSelectFile(file.path)}
+              aria-current={selected ? "true" : undefined}
+              title={file.path}
+            >
+              <!-- Chevron (12px) + gap (6px): puts the file name under the group icon. -->
+              <div class="flex w-full items-center gap-2 pl-[1.125rem]">
+                <span class="text-base-content min-w-0 flex-1 truncate font-mono text-[12px]">
+                  {file.fileName}
+                </span>
+                <SymlinkMarker target={file.linkTarget} />
+                <ReferenceMarker references={file.references} />
+                {#if file.template}
+                  {#if file.template.state !== "in_sync"}
+                    <span class="tag tag-warning shrink-0">{$t("library.tag.changed")}</span>
+                  {:else}
+                    <span class="tag tag-neutral max-w-24 shrink-0 truncate"
+                      >{file.template.name}</span
+                    >
+                  {/if}
                 {/if}
-              {/if}
-            </div>
-          </button>
-        {/each}
+              </div>
+            </button>
+          {/each}
+        {/if}
       {/each}
     {/if}
   </div>

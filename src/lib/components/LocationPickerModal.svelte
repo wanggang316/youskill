@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { Search } from "@lucide/svelte";
+  import { ChevronRight, Search } from "@lucide/svelte";
   import { confirm } from "@tauri-apps/plugin-dialog";
   import ContextMenu from "$lib/components/ui/ContextMenu.svelte";
   import Modal from "$lib/components/ui/Modal.svelte";
@@ -97,6 +97,35 @@
   });
 
   const allLocations = $derived(groups.flatMap((group) => group.locations));
+
+  /** Collapsed group keys, remembered per machine. */
+  const COLLAPSED_STORAGE_KEY = "youskill.collapsedLocationGroups";
+
+  const readCollapsed = (): string[] => {
+    try {
+      const parsed: unknown = JSON.parse(localStorage.getItem(COLLAPSED_STORAGE_KEY) ?? "[]");
+      return Array.isArray(parsed) ? parsed.filter((key) => typeof key === "string") : [];
+    } catch {
+      return [];
+    }
+  };
+
+  let collapsed = $state<string[]>(readCollapsed());
+
+  function toggleGroup(key: string) {
+    collapsed = collapsed.includes(key)
+      ? collapsed.filter((item) => item !== key)
+      : [...collapsed, key];
+    try {
+      localStorage.setItem(COLLAPSED_STORAGE_KEY, JSON.stringify(collapsed));
+    } catch {
+      // Remembering the state is best effort.
+    }
+  }
+
+  // A search must not hide its own matches in a collapsed group.
+  const isGroupOpen = (group: Group) =>
+    !group.label || search.trim() !== "" || !collapsed.includes(group.key);
 
   /** Every location that has the skill, whether or not the search shows it. */
   const installedKeys = $derived.by((): string[] => {
@@ -230,15 +259,24 @@
         </p>
       {:else}
         {#each groups as group (group.key)}
+          {@const groupOpen = isGroupOpen(group)}
           {#if group.label}
-            <p
-              class="text-base-content-subtle truncate px-2.5 pt-2 pb-1 text-[11px]"
+            <button
+              class="text-base-content-subtle hover:text-base-content flex w-full items-center gap-1.5 px-2.5 pt-2 pb-1 text-left text-[11px] transition"
+              type="button"
+              onclick={() => toggleGroup(group.key)}
+              aria-expanded={groupOpen}
               title={group.key}
             >
-              {group.label}
-            </p>
+              <ChevronRight
+                size={12}
+                class={`shrink-0 transition ${groupOpen ? "rotate-90" : ""}`}
+              />
+              <span class="min-w-0 flex-1 truncate">{group.label}</span>
+              <span class="text-base-content-faint shrink-0">{group.locations.length}</span>
+            </button>
           {/if}
-          {#each group.locations as item (item.key)}
+          {#each groupOpen ? group.locations : [] as item (item.key)}
             {@const checked = selected.includes(item.key)}
             <ContextMenu
               items={[

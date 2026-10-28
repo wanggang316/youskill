@@ -6,33 +6,47 @@
 
 [English](README.md) | 中文
 
-这是一个桌面端 [Agent Skills](https://agentskills.io/) 管理工具，帮助你统一管理电脑上的 Skills。它体积小、启动快，目标是把 Skills 管理这件事做得清晰、可视、可维护。
+**你的 Agent 资产管理伙伴。**
 
-## 为什么做这个项目
+YouSkill 是一个轻量的桌面应用，统一管理各个 Agent 和项目中的 [Agent Skills](https://agentskills.io/) 与指令文件。中心库连接来源和安装位置，每份副本的变更清晰可见，保留哪一版由你决定。基于 Tauri 构建，快速、轻量。
 
-1. 日常会同时使用多个 Agent 应用（Codex、Claude Code、Cursor、OpenCode、TRAE 等），Skills 互相隔离且管理方式不统一。
-2. Skill 的安装、更新、删除常常需要在多个目录之间手动拷贝、查找和同步，规模一大就容易混乱。
-3. 对普通用户来说，手动安装或纯 CLI 使用门槛偏高，缺少直观的图形化管理工具。
-4. 优秀 Skill 资源分散，查找、学习和复用成本较高。
+## 管理 Skill 的整个生命周期
+
+1. **导入一次。** 浏览内置市场、粘贴 GitHub 地址，或选择 `.zip` / `.skill` 压缩包、本地文件夹。
+2. **装到需要的地方。** 选择用户级或某个项目，勾选 Agent，再选择复制或软链接。内置 Claude Code、Codex、Cursor、OpenCode 等常见 Agent，也可通过 Skill 目录添加自定义 Agent。
+3. **追踪每份副本。** 查看各个项目和 Agent 安装了哪些 Skill，在同步前识别落后版本、本地修改和冲突。
+4. **决定如何更新。** 检查来源更新、查看本地差异，再选择将本地副本采纳到中心库，或从中心库推送到安装位置。
 
 ## 功能概览
 
-1. 中心化 Skill 库：所有 Skill 只导入一次，统一存放在 `~/.youskill/skills`，由唯一的 `~/.youskill/.skill-lock.json` 管理。
-2. 两步式工作流：先「导入」（Skill 市场、GitHub 地址、`.zip` / `.skill` 压缩包、本地文件夹），再「安装」到 40+ 主流编程工具或自定义 Agent 应用的用户级 / 项目级目录，支持复制与软链接。
-3. 安装矩阵：一眼看清每个 Skill 安装到了哪些项目、哪些 Agent。
-4. 变更追踪：每个安装位置都记录它所基于的中心库版本，因此能区分「落后」「本地修改」「冲突」，并由你选择同步方向（从来源更新、推送到目标、采纳本地副本）。
-5. 文件夹扫描：扫描项目目录或某个 Agent 的 skills 目录，把找到的 Skill 同步进中心库。
-6. 内置动态 Skill 市场（15000+），并可对照来源仓库检查更新。
-7. 兼容 `.agents/skills` 共享目录约定（即「Agents (shared)」目标）。
-8. 一键备份整个中心库，支持多主题和多语言。
+- **统一中心库。** 按来源组织 Skill，查看完整文件、版本和安装位置；扫描已有 Agent 或项目目录，将 Skill 纳入中心库。
+- **共享指令。** 集中管理 `AGENTS.md` 和 `CLAUDE.md` 模板，应用到多个 Agent 和项目。
+- **翻译与双语阅读。** 通过大模型翻译，用熟悉的语言对照原文阅读 Skill。
+- **内置 Skill 市场。** 按分类浏览，一键导入，已在库中的 Skill 会显示标记。
+- **命令行工作流。** 通过 `youskill` 命令行导入、安装、查看和同步 Skill 与指令，也可让 Agent 帮你管理。
+- **日常管理。** 把中心库备份到 GitHub 私有仓库并在其他电脑上恢复，切换主题和界面语言。
 
-存储布局、lock 文件与变更模型见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+存储布局与变更追踪模型见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，命令行用法见 [docs/CLI.md](docs/CLI.md)。
 
 ## 预览
 
-![main](./public/01.png)
-![install](./public/02.png)
-![settings](./public/03.png)
+### Skill 库
+
+按来源浏览 Skill，查看版本、完整文件和安装位置。
+
+![Skill 库：来源分组、版本信息和安装位置](./public/shot-skills.webp)
+
+### 指令
+
+统一管理可复用的指令模板，查看使用它们的 Agent 和项目。
+
+![指令模板及其安装的 AGENTS.md 和 CLAUDE.md 文件](./public/shot-instructions.webp)
+
+### 项目
+
+在一个视图中查看项目的 Agent、指令文件和已安装 Skill。
+
+![项目概览：Agent、指令文件和已安装 Skill](./public/shot-projects.webp)
 
 ## 下载安装
 

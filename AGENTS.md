@@ -119,3 +119,9 @@ git pull --rebase && git push
 - Resolve conflicts in YOUR files only
 - If conflict is in a file you didn't modify, abort and ask the user
 - NEVER force push
+
+## Agent skills
+
+### Domain docs
+
+Single-context: `CONTEXT.md` and `docs/adr/` at the repo root. See `docs/agents/domain.md`.

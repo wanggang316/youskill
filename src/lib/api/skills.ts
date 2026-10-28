@@ -79,6 +79,8 @@ export async function fetchRemoteSkills(params?: {
   search?: string;
   sortBy?: string;
   sortOrder?: string;
+  tagId?: number;
+  source?: string;
 }): Promise<RemoteSkillsResponse> {
   return apiCall<RemoteSkillsResponse>("fetch_remote_skills", params || {});
 }
@@ -149,4 +151,29 @@ export async function getCachedSkillTranslation(markdown: string): Promise<strin
 /** Translates `markdown`. Set `force` to skip the cached translation and replace it. */
 export async function translateSkillMarkdown(markdown: string, force = false): Promise<string> {
   return apiCall<string>("translate_skill_markdown", { markdown, force });
+}
+
+export interface MarketCategory {
+  icon?: string | null;
+  id: number;
+  name: string;
+  skill_count: number;
+}
+
+export interface MarketRepository extends MarketCategory {
+  star_count?: number | null;
+  enabled: boolean;
+  type: string;
+}
+
+export function fetchMarketCategories(): Promise<MarketCategory[]> {
+  return apiCall("fetch_market_categories");
+}
+
+export function fetchHotRepositories(): Promise<MarketRepository[]> {
+  return apiCall("fetch_hot_repositories");
+}
+
+export function fetchRemoteSkill(skillId: string): Promise<RemoteSkill> {
+  return apiCall("fetch_remote_skill", { skillId });
 }
