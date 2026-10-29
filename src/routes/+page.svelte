@@ -29,13 +29,13 @@
   } from "$lib/api";
   import {
     agentsById,
-    checkAllSourceUpdates,
     checkSourceUpdates,
     hubError,
     hubLoading,
     hubSkills,
     migrationReport,
     refreshHub,
+    refreshHubAndSources,
     skillLabel,
     sourceChecking,
   } from "$lib/stores/hub";
@@ -269,9 +269,7 @@
   }
 
   function handleRefresh() {
-    refreshHub({ manual: true })
-      .then(() => checkAllSourceUpdates({ force: true, manual: true }))
-      .catch(console.error);
+    refreshHubAndSources().catch(console.error);
   }
 
   function handleCheckSource() {
