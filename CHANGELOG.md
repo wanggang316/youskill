@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The Library refresh button spins only for a manual refresh and for the first load. Refreshes at startup, when the window gets focus, when the Library opens, and after a change run in the background; their errors go to the log and do not replace the error on the page ([#57](https://github.com/wanggang316/youskill/issues/57)).
+
 ### Fixed
 
 ### Removed

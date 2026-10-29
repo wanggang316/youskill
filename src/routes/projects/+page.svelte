@@ -351,7 +351,7 @@
       onRemoveProject={handleRemoveProject}
       onForgetProject={handleForgetProject}
       onRegisterProject={handleRegisterProject}
-      onRefresh={() => refreshHub().catch(console.error)}
+      onRefresh={() => refreshHub({ manual: true }).catch(console.error)}
     />
 
     <div class="surface-panel grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)]">

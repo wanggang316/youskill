@@ -76,26 +76,51 @@ export async function loadAgents(): Promise<void> {
   }
 }
 
-let refreshPromise: Promise<void> | null = null;
+/**
+ * A manual refresh, or the first load while the list has no data, shows the loading state and
+ * its error. Other refreshes run in the background: they update the list and only log errors.
+ */
+export interface RefreshOptions {
+  manual?: boolean;
+}
 
-export async function refreshHub(): Promise<void> {
-  if (refreshPromise) return refreshPromise;
-  hubLoading.set(true);
-  hubError.set("");
-  refreshPromise = (async () => {
+/** An in-flight run that every caller shares; any foreground caller makes it foreground. */
+interface SharedRun<T> {
+  promise: Promise<T>;
+  foreground: boolean;
+}
+
+let hubRun: SharedRun<void> | null = null;
+
+export function refreshHub(options: RefreshOptions = {}): Promise<void> {
+  const foreground = options.manual === true || !get(hubLoaded);
+  if (foreground) hubLoading.set(true);
+  if (hubRun) {
+    hubRun.foreground ||= foreground;
+    return hubRun.promise;
+  }
+  if (foreground) hubError.set("");
+  const run: SharedRun<void> = { promise: Promise.resolve(), foreground };
+  hubRun = run;
+  run.promise = (async () => {
     try {
       const skills = await listHubSkills();
       skills.sort(compareSkills);
       hubSkills.set(skills);
       hubLoaded.set(true);
+      if (run.foreground) hubError.set("");
     } catch (error) {
-      hubError.set(String(error));
+      if (run.foreground) {
+        hubError.set(String(error));
+      } else {
+        console.error("Background hub refresh failed:", error);
+      }
     } finally {
-      hubLoading.set(false);
-      refreshPromise = null;
+      if (run.foreground) hubLoading.set(false);
+      hubRun = null;
     }
   })();
-  return refreshPromise;
+  return run.promise;
 }
 
 export function applySkillView(view: HubSkillView | null | undefined): void {
@@ -114,35 +139,46 @@ export function applySkillView(view: HubSkillView | null | undefined): void {
 /** Automatic checks run at most this often; the GitHub API allows 60 anonymous requests an hour. */
 const AUTO_SOURCE_CHECK_INTERVAL_MS = 5 * 60 * 1000;
 
-let sourceCheckPromise: Promise<SourceUpdate[]> | null = null;
+let sourceRun: SharedRun<SourceUpdate[]> | null = null;
 let lastFullSourceCheckAt = 0;
 
-export function checkSourceUpdates(ids?: string[]): Promise<SourceUpdate[]> {
-  if (sourceCheckPromise) return sourceCheckPromise;
-  sourceChecking.set(true);
-  sourceCheckPromise = (async () => {
+/** Check the sources of `ids`, or of every skill; only a manual check shows the checking state. */
+export function checkSourceUpdates(
+  ids?: string[],
+  options: RefreshOptions = {}
+): Promise<SourceUpdate[]> {
+  const foreground = options.manual === true;
+  if (foreground) sourceChecking.set(true);
+  if (sourceRun) {
+    sourceRun.foreground ||= foreground;
+    return sourceRun.promise;
+  }
+  const run: SharedRun<SourceUpdate[]> = { promise: Promise.resolve([]), foreground };
+  sourceRun = run;
+  run.promise = (async () => {
     try {
       const result = await checkSourceUpdatesApi(ids ?? null);
       lastSourceCheck.set(result);
-      await refreshHub();
+      await refreshHub({ manual: run.foreground });
       return result;
     } catch (error) {
       console.error("Failed to check source updates:", error);
       return [];
     } finally {
-      sourceChecking.set(false);
-      sourceCheckPromise = null;
+      if (run.foreground) sourceChecking.set(false);
+      sourceRun = null;
     }
   })();
-  return sourceCheckPromise;
+  return run.promise;
 }
 
 /**
  * Check every GitHub-sourced skill in one batched call. Automatic triggers (startup, opening
- * the library) are throttled; `force` is for an explicit refresh.
+ * the library) are throttled and run in the background; the refresh button passes `force` and
+ * `manual`.
  */
 export async function checkAllSourceUpdates(
-  options: { force?: boolean } = {}
+  options: { force?: boolean } & RefreshOptions = {}
 ): Promise<SourceUpdate[]> {
   if (!get(hubSkills).some((skill) => skill.source.type === "github")) return [];
   const now = Date.now();
@@ -150,7 +186,7 @@ export async function checkAllSourceUpdates(
     return get(lastSourceCheck);
   }
   lastFullSourceCheckAt = now;
-  return checkSourceUpdates();
+  return checkSourceUpdates(undefined, { manual: options.manual });
 }
 
 export async function loadMigrationReport(): Promise<void> {
