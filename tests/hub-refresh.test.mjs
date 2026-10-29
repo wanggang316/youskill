@@ -145,3 +145,39 @@ test("manual source check shows the checking state until the hub refresh ends", 
   assert.equal(get(hub.sourceChecking), false);
   assert.equal(get(hub.hubLoading), false);
 });
+
+test("manual refresh joining a background run clears the previous error", async () => {
+  hub.hubLoaded.set(true);
+  hub.hubError.set("previous error");
+  const list = deferred();
+  handlers.list_hub_skills = () => list.promise;
+  const background = hub.refreshHub();
+  const manual = hub.refreshHub({ manual: true });
+  assert.equal(get(hub.hubError), "");
+  list.resolve([githubSkill]);
+  await Promise.all([background, manual]);
+  assert.equal(get(hub.hubError), "");
+});
+
+test("refresh button keeps the spinner from the hub refresh through the source check", async () => {
+  hub.hubLoaded.set(true);
+  hub.hubSkills.set([githubSkill]);
+  const list = deferred();
+  const check = deferred();
+  let listCalls = 0;
+  handlers.list_hub_skills = () => (++listCalls === 1 ? list.promise : [githubSkill]);
+  handlers.check_source_updates = () => check.promise;
+  const spinning = [];
+  const record = () => spinning.push(get(hub.hubLoading) || get(hub.sourceChecking));
+  const unsubscribe = [hub.hubLoading.subscribe(record), hub.sourceChecking.subscribe(record)];
+  spinning.length = 0;
+  const run = hub.refreshHubAndSources();
+  list.resolve([githubSkill]);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  check.resolve([]);
+  await run;
+  unsubscribe.forEach((stop) => stop());
+  assert.equal(spinning.at(-1), false);
+  assert.ok(spinning.slice(0, -1).every(Boolean), `spinner dropped: ${spinning}`);
+  assert.equal(listCalls, 2);
+});

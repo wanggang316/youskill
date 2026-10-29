@@ -92,14 +92,30 @@ interface SharedRun<T> {
 
 let hubRun: SharedRun<void> | null = null;
 
+/** `hubLoading` stays set while any foreground hub run or manual refresh holds it. */
+let hubLoadingHolds = 0;
+
+function holdHubLoading(): void {
+  hubLoadingHolds += 1;
+  hubLoading.set(true);
+}
+
+function releaseHubLoading(): void {
+  hubLoadingHolds -= 1;
+  if (hubLoadingHolds === 0) hubLoading.set(false);
+}
+
 export function refreshHub(options: RefreshOptions = {}): Promise<void> {
   const foreground = options.manual === true || !get(hubLoaded);
-  if (foreground) hubLoading.set(true);
+  if (foreground) hubError.set("");
   if (hubRun) {
-    hubRun.foreground ||= foreground;
+    if (foreground && !hubRun.foreground) {
+      hubRun.foreground = true;
+      holdHubLoading();
+    }
     return hubRun.promise;
   }
-  if (foreground) hubError.set("");
+  if (foreground) holdHubLoading();
   const run: SharedRun<void> = { promise: Promise.resolve(), foreground };
   hubRun = run;
   run.promise = (async () => {
@@ -116,7 +132,7 @@ export function refreshHub(options: RefreshOptions = {}): Promise<void> {
         console.error("Background hub refresh failed:", error);
       }
     } finally {
-      if (run.foreground) hubLoading.set(false);
+      if (run.foreground) releaseHubLoading();
       hubRun = null;
     }
   })();
@@ -187,6 +203,17 @@ export async function checkAllSourceUpdates(
   }
   lastFullSourceCheckAt = now;
   return checkSourceUpdates(undefined, { manual: options.manual });
+}
+
+/** The refresh button: reload the hub, then force a source check; the loading state covers both. */
+export async function refreshHubAndSources(): Promise<void> {
+  holdHubLoading();
+  try {
+    await refreshHub({ manual: true });
+    await checkAllSourceUpdates({ force: true, manual: true });
+  } finally {
+    releaseHubLoading();
+  }
 }
 
 export async function loadMigrationReport(): Promise<void> {
