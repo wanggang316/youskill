@@ -269,14 +269,14 @@
   }
 
   function handleRefresh() {
-    refreshHub()
-      .then(() => checkAllSourceUpdates({ force: true }))
+    refreshHub({ manual: true })
+      .then(() => checkAllSourceUpdates({ force: true, manual: true }))
       .catch(console.error);
   }
 
   function handleCheckSource() {
     if (!selectedSkill) return;
-    void checkSourceUpdates([selectedSkill.id]).then((updates) => {
+    void checkSourceUpdates([selectedSkill.id], { manual: true }).then((updates) => {
       const failed = updates.find((update) => update.error);
       if (failed?.error) actionError = failed.error;
     });
