@@ -35,6 +35,7 @@
     ensureUpdateChecked,
     installAvailableUpdate,
     openUpdateDialog,
+    startAutomaticUpdateChecks,
     updaterState,
   } from "$lib/stores/updater";
   import { refreshUserProjects, refreshWorkspaces } from "$lib/stores/user-projects";
@@ -123,6 +124,12 @@
       .catch(console.error);
     refreshInstructions().catch(console.error);
     ensureUpdateChecked().catch(console.error);
+    const stopAutomaticUpdateChecks = startAutomaticUpdateChecks({
+      onFocus: (listener) =>
+        getCurrentWindow().onFocusChanged(({ payload: focused }) => {
+          if (focused) listener();
+        }),
+    });
     listen("open-install-modal", () => {
       openImportModal();
     })
@@ -153,6 +160,7 @@
       unlistenOpenInstallModal?.();
       unlistenCheckForUpdates?.();
       unlistenFocus?.();
+      stopAutomaticUpdateChecks();
       document.removeEventListener("mousedown", handleWindowDrag);
       document.removeEventListener("keydown", handleHistoryKeys);
     };

@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The app checks for app updates when the window gets focus and every hour, at most once each hour, and shows the Update button in the top bar when a release is found ([#54](https://github.com/wanggang316/youskill/issues/54)).
+
 ### Changed
 
 ### Fixed
