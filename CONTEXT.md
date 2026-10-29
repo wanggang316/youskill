@@ -14,6 +14,8 @@ _Avoid_: Local skill, managed copy
 
 **Skill id**:
 The permanent identity of a hub skill. It never changes, also when the skill is renamed.
+The one exception is the first library sync merge, where a local skill takes the id of
+the same skill in the backup repository (see `docs/decisions/0003-library-sync-id-on-first-merge.md`).
 _Avoid_: Skill key
 
 **Skill name**:
@@ -54,3 +56,30 @@ _Avoid_: Quick Open, command palette
 **Filter**:
 A narrowing of the list on the current page only, such as the Library source filter.
 _Avoid_: Search
+
+### Library sync
+
+**Restore plan**:
+The item-by-item comparison of the base (last synced commit), this computer and a target
+commit, computed before a restore. A restore applies one plan with the user's decisions.
+_Avoid_: Pull preview, diff
+
+**Conflict**:
+An item that changed on this computer and in the repository to different results. The user
+keeps the local version, takes the repository version, or keeps both.
+_Avoid_: Divergence
+
+**Removal candidate**:
+An item that the repository removed and this computer did not change. It is removed here
+only after confirmation.
+_Avoid_: Remote deletion
+
+**Deferred item**:
+A repository version the user left out of a restore. Backups carry it forward unchanged
+until the user takes it or the repository changes it again.
+_Avoid_: Skipped item
+
+**Checkpoint**:
+The local copy of the lock files, sync state and changed hub files taken before a restore.
+Undo puts it back; the repository is not changed.
+_Avoid_: Snapshot, backup

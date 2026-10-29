@@ -12,9 +12,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - The app checks for app updates when the window gets focus and every hour, at most once each hour, and shows the Update button in the top bar when a release is found ([#54](https://github.com/wanggang316/youskill/issues/54)).
+- Restore from the GitHub backup merges item by item: changes on one side are taken automatically, items changed on both sides are conflicts (keep local, take remote or keep both), remote removals need confirmation, and selected items can be left out. A first connect to a repository with a library offers merge, replace local or replace remote, and recognizes equal items with different ids. A restore can also bring back an earlier backup, and the last restore can be undone on this computer ([#60](https://github.com/wanggang316/youskill/issues/60)).
 
 ### Changed
 
+- Pull is replaced by Restore: a preview with decisions, then an apply that commits the merged library on top of the branch. Backup no longer stops at "diverged" without a way forward; it points to Restore ([#60](https://github.com/wanggang316/youskill/issues/60)).
 - The Library refresh button spins only for a manual refresh and for the first load. Refreshes at startup, when the window gets focus, when the Library opens, and after a change run in the background; their errors go to the log and do not replace the error on the page ([#57](https://github.com/wanggang316/youskill/issues/57)).
 
 ### Fixed
