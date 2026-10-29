@@ -14,6 +14,8 @@ _Avoid_: Local skill, managed copy
 
 **Skill id**:
 The permanent identity of a hub skill. It never changes, also when the skill is renamed.
+The one exception is the first library sync merge, where a local skill takes the id of
+the same skill in the backup repository (see `docs/decisions/0002-library-sync-id-on-first-merge.md`).
 _Avoid_: Skill key
 
 **Skill name**:
