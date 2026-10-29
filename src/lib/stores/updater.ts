@@ -42,8 +42,8 @@ type Unlisten = () => void;
 type AutomaticCheckTriggers = {
   /** Registers a window focus listener and resolves to its remover. */
   onFocus: (listener: () => void) => Promise<Unlisten>;
-  setInterval?: (callback: () => void, ms: number) => unknown;
-  clearInterval?: (id: unknown) => void;
+  setTimeout?: (callback: () => void, ms: number) => unknown;
+  clearTimeout?: (id: unknown) => void;
 };
 
 const getErrorMessage = (error: unknown, fallback: string): string => {
@@ -65,6 +65,8 @@ export function createAppUpdater(deps = { check, relaunch, now: () => Date.now()
   let checkPromise: Promise<void> | null = null;
   /** End time of the last check of any kind; in memory only, so each app start checks again. */
   let lastCheckAt: number | null = null;
+  /** Called when a check ends, so that the automatic timer restarts from that time. */
+  let onCheckEnd: (() => void) | null = null;
 
   async function ensureUpdateChecked(force = false): Promise<void> {
     if (checkPromise) {
@@ -103,6 +105,7 @@ export function createAppUpdater(deps = { check, relaunch, now: () => Date.now()
         throw error;
       } finally {
         lastCheckAt = deps.now();
+        onCheckEnd?.();
       }
     })();
 
@@ -195,18 +198,42 @@ export function createAppUpdater(deps = { check, relaunch, now: () => Date.now()
     }
   }
 
-  /** Checks on window focus and every hour; returns a function that removes both triggers. */
+  /**
+   * Checks on window focus and 1 hour after the end of each check; returns a
+   * function that removes both triggers.
+   */
   function startAutomaticUpdateChecks({
     onFocus,
-    setInterval: startTimer = (callback, ms) => globalThis.setInterval(callback, ms),
-    clearInterval: stopTimer = (id) =>
-      globalThis.clearInterval(id as ReturnType<typeof globalThis.setInterval>),
+    setTimeout: startTimer = (callback, ms) => globalThis.setTimeout(callback, ms),
+    clearTimeout: stopTimer = (id) =>
+      globalThis.clearTimeout(id as ReturnType<typeof globalThis.setTimeout>),
   }: AutomaticCheckTriggers): Unlisten {
-    const runCheck = () => void checkForUpdateIfDue();
-    const timer = startTimer(runCheck, APP_UPDATE_CHECK_INTERVAL_MS);
     let stopped = false;
+    let timer: unknown = null;
     let unlistenFocus: Unlisten | null = null;
-    onFocus(runCheck)
+
+    const arm = (delay: number) => {
+      if (timer !== null) stopTimer(timer);
+      timer = startTimer(() => void fire(), delay);
+    };
+    const armFromLastCheck = () => {
+      if (stopped) return;
+      const delay =
+        lastCheckAt === null
+          ? 0
+          : Math.max(0, lastCheckAt + APP_UPDATE_CHECK_INTERVAL_MS - deps.now());
+      arm(delay);
+    };
+    const fire = async () => {
+      timer = null;
+      await checkForUpdateIfDue();
+      // A check that ran has armed the timer already; a skipped one tries again after an interval.
+      if (!stopped && timer === null) arm(APP_UPDATE_CHECK_INTERVAL_MS);
+    };
+
+    onCheckEnd = armFromLastCheck;
+    armFromLastCheck();
+    onFocus(() => void checkForUpdateIfDue())
       .then((unlisten) => {
         // The layout can be destroyed before the listener is registered.
         if (stopped) unlisten();
@@ -216,7 +243,9 @@ export function createAppUpdater(deps = { check, relaunch, now: () => Date.now()
 
     return () => {
       stopped = true;
-      stopTimer(timer);
+      if (onCheckEnd === armFromLastCheck) onCheckEnd = null;
+      if (timer !== null) stopTimer(timer);
+      timer = null;
       unlistenFocus?.();
       unlistenFocus = null;
     };
