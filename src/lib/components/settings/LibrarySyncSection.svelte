@@ -4,19 +4,26 @@
   import { ExternalLink, Loader2, RefreshCw } from "@lucide/svelte";
   import {
     applyLibraryPending,
+    applyLibraryRestore,
     backupLibrary,
-    checkLibraryRemote,
     connectLibrarySync,
     disconnectLibrarySync,
     getGithubAuthStatus,
     getLibrarySyncStatus,
+    listLibraryHistory,
     listLibraryPending,
-    pullLibrary,
+    planLibraryRestore,
+    undoLibraryRestore,
+    type FirstConnectMode,
     type GithubAuthStatus,
     type LibraryChange,
     type PendingAction,
     type PendingItem,
-    type RemoteCheck,
+    type RemoteCommit,
+    type RestoreDecisions,
+    type RestoreOptions,
+    type RestoreOutcome,
+    type RestorePlan,
     type SyncStatus,
   } from "$lib/api";
   import IconButton from "$lib/components/ui/IconButton.svelte";
@@ -25,10 +32,20 @@
   import { buildSettingsHref } from "$lib/navigation/app-shell";
   import { agentsById, loadAgents, refreshHub } from "$lib/stores/hub";
   import { refreshInstructions } from "$lib/stores/instructions";
+  import LibraryRestorePanel from "./LibraryRestorePanel.svelte";
   import SettingsPane from "./SettingsPane.svelte";
   import SettingsRow from "./SettingsRow.svelte";
 
-  type Busy = "load" | "connect" | "backup" | "check" | "pull" | "apply" | "disconnect";
+  type Busy =
+    | "load"
+    | "connect"
+    | "backup"
+    | "check"
+    | "restore"
+    | "apply"
+    | "history"
+    | "undo"
+    | "disconnect";
   type Notice = { tone: "success" | "info" | "error"; text: string; details?: string[] };
 
   const DEFAULT_REPO = "youskill-library";
@@ -36,7 +53,11 @@
 
   let status = $state<SyncStatus | null>(null);
   let github = $state<GithubAuthStatus | null>(null);
-  let remote = $state<RemoteCheck | null>(null);
+  /** The restore preview on screen, or the last check result when it has nothing to show. */
+  let plan = $state<RestorePlan | null>(null);
+  let showPlan = $state(false);
+  let history = $state<RemoteCommit[] | null>(null);
+  let confirmUndo = $state(false);
   let pending = $state<PendingItem[]>([]);
   let selected = $state<string[]>([]);
   let repoInput = $state(DEFAULT_REPO);
@@ -115,8 +136,11 @@
   const connect = () =>
     run("connect", async () => {
       status = await connectLibrarySync(repoInput);
-      remote = await checkLibraryRemote();
-      if (remote.remoteHasLibrary && status.libraryEmpty) {
+      plan = await planLibraryRestore("pull");
+      if (plan.state === "choose_mode") {
+        showPlan = true;
+        notice = { tone: "info", text: $t("settings.sync.connectedChooseHint") };
+      } else if (plan.state !== "remote_empty" && status.libraryEmpty) {
         notice = { tone: "info", text: $t("settings.sync.connectedRestoreHint") };
       } else {
         notice = { tone: "success", text: $t("settings.sync.connected") };
@@ -127,7 +151,9 @@
     run("disconnect", async () => {
       await disconnectLibrarySync();
       confirmDisconnect = false;
-      remote = null;
+      plan = null;
+      showPlan = false;
+      history = null;
       pending = [];
       status = await getLibrarySyncStatus();
     });
@@ -147,43 +173,116 @@
                 ? { tone: "error", text: $t("settings.sync.diverged") }
                 : { tone: "error", text: $t("settings.sync.backupRemoteNotEmpty") };
       status = await getLibrarySyncStatus();
-      if (outcome.result === "remote_ahead") remote = await checkLibraryRemote();
-      else if (outcome.result === "pushed") remote = null;
-    });
-
-  const check = () =>
-    run("check", async () => {
-      remote = await checkLibraryRemote();
-      if (!remote.remoteHasLibrary) {
-        notice = { tone: "info", text: $t("settings.sync.remoteEmpty") };
+      if (outcome.result === "pushed") {
+        plan = null;
+        showPlan = false;
+      } else if (outcome.result !== "up_to_date") {
+        await preview(outcome.result === "remote_not_empty" ? "merge" : "pull");
       }
     });
 
-  const pull = () =>
-    run("pull", async () => {
-      const outcome = await pullLibrary();
-      const count = changeCount(outcome.changes);
-      notice =
-        outcome.result === "pulled"
-          ? {
-              tone: outcome.errors.length ? "error" : "success",
-              text: $t("settings.sync.pulled", { count }),
-              details: outcome.errors,
-            }
-          : outcome.result === "up_to_date"
-            ? { tone: "info", text: $t("settings.sync.pullUpToDate") }
-            : outcome.result === "remote_empty"
-              ? { tone: "info", text: $t("settings.sync.remoteEmpty") }
-              : outcome.result === "diverged"
-                ? { tone: "error", text: $t("settings.sync.diverged") }
-                : { tone: "error", text: $t("settings.sync.pullLocalNotEmpty") };
-      if (outcome.result === "pulled") {
-        remote = null;
-        await reloadLibrary(outcome.agentsChanged);
-        await loadPending();
+  /** Plan a restore and show it, or report that there is nothing to restore. */
+  async function preview(mode: RestorePlan["mode"], target: string | null = null) {
+    plan = await planLibraryRestore(mode, target);
+    showPlan = plan.state === "ready" || plan.state === "choose_mode";
+    if (plan.state === "up_to_date") {
+      notice = { tone: "info", text: $t("settings.sync.pullUpToDate") };
+    } else if (plan.state === "remote_empty") {
+      notice = { tone: "info", text: $t("settings.sync.remoteEmpty") };
+    }
+  }
+
+  /** A plan the user has nothing to decide on. */
+  function isSimple(current: RestorePlan): boolean {
+    return (
+      current.state === "ready" &&
+      current.target === null &&
+      current.items.every((item) => item.resolution !== "conflict") &&
+      current.items.every((item) => item.resolution !== "removal_candidate") &&
+      current.items.every((item) => !item.deferred)
+    );
+  }
+
+  const check = () => run("check", () => preview("pull"));
+
+  const restore = () =>
+    run("restore", async () => {
+      await preview("pull");
+      if (plan && isSimple(plan)) {
+        await applyPlan(
+          plan,
+          { conflicts: {}, removals: {}, include: {} },
+          { applyInstalls: false }
+        );
       }
+    });
+
+  const chooseMode = (mode: FirstConnectMode) =>
+    run("check", () => preview(mode, plan?.target ?? null));
+
+  const applyRestore = (decisions: RestoreDecisions, options: RestoreOptions) =>
+    run("restore", async () => {
+      if (plan) await applyPlan(plan, decisions, options);
+    });
+
+  async function applyPlan(
+    current: RestorePlan,
+    decisions: RestoreDecisions,
+    options: RestoreOptions
+  ) {
+    const outcome = await applyLibraryRestore(current, decisions, options);
+    if (outcome.result === "stale") {
+      notice = {
+        tone: "error",
+        text: outcome.localApplied
+          ? $t("settings.sync.restorePushRejected")
+          : $t("settings.sync.restoreStale"),
+      };
+      if (!outcome.localApplied) await preview(current.mode, current.target);
+    } else {
+      notice = restoreNotice(outcome);
+      plan = null;
+      showPlan = false;
+      history = null;
+    }
+    if (outcome.localApplied) {
+      await reloadLibrary(outcome.agentsChanged);
+      await loadPending();
+    }
+    status = await getLibrarySyncStatus();
+  }
+
+  function restoreNotice(outcome: RestoreOutcome): Notice {
+    const details = [...outcome.errors, ...(outcome.installs?.failures ?? [])];
+    const parts = [
+      outcome.pushed ? $t("settings.sync.restoredPushed") : $t("settings.sync.restored"),
+    ];
+    if (outcome.installs) {
+      parts.push($t("settings.sync.pendingApplied", { count: outcome.installs.applied }));
+    }
+    return { tone: details.length ? "error" : "success", text: parts.join(" "), details };
+  }
+
+  const toggleHistory = () =>
+    run("history", async () => {
+      history = history ? null : await listLibraryHistory();
+    });
+
+  const previewCommit = (commit: RemoteCommit) => run("check", () => preview("pull", commit.id));
+
+  const undo = () =>
+    run("undo", async () => {
+      await undoLibraryRestore();
+      confirmUndo = false;
+      plan = null;
+      showPlan = false;
+      notice = { tone: "success", text: $t("settings.sync.undone") };
+      await reloadLibrary(true);
+      await loadPending();
       status = await getLibrarySyncStatus();
     });
+
+  const shortId = (id: string) => id.slice(0, 7);
 
   const applyPending = () =>
     run("apply", async () => {
@@ -226,10 +325,12 @@
   }
 
   function remoteSummary(current: SyncStatus): string {
-    if (remote) {
-      if (!remote.remoteHasLibrary) return $t("settings.sync.remoteEmpty");
-      return remote.remoteAhead
-        ? $t("settings.sync.remoteAhead", { count: remote.changes.length })
+    if (plan) {
+      if (plan.state === "remote_empty") return $t("settings.sync.remoteEmpty");
+      if (plan.state === "choose_mode") return $t("settings.sync.remoteHasLibrary");
+      const incoming = plan.items.filter((item) => item.resolution !== "keep_local").length;
+      return incoming > 0
+        ? $t("settings.sync.remoteAhead", { count: incoming })
         : $t("settings.sync.remoteUpToDate");
     }
     return current.lastPullAt
@@ -342,12 +443,95 @@
           {#if busy === "check"}<Loader2 size={13} class="animate-spin" />{/if}
           {$t("settings.sync.check")}
         </button>
-        <button class="settings-button" type="button" onclick={pull} disabled={busy !== null}>
-          {#if busy === "pull"}<Loader2 size={13} class="animate-spin" />{/if}
+        <button class="settings-button" type="button" onclick={restore} disabled={busy !== null}>
+          {#if busy === "restore" && !showPlan}<Loader2 size={13} class="animate-spin" />{/if}
           {$t("settings.sync.pull")}
         </button>
       </SettingsRow>
+      <SettingsRow
+        label={$t("settings.sync.history")}
+        description={status.checkpoint
+          ? $t("settings.sync.checkpointAt", { time: formatTime(status.checkpoint.createdAt) })
+          : $t("settings.sync.historyHint")}
+      >
+        {#if status.checkpoint}
+          {#if confirmUndo}
+            <button
+              class="settings-button text-error"
+              type="button"
+              onclick={undo}
+              disabled={busy !== null}
+            >
+              {#if busy === "undo"}<Loader2 size={13} class="animate-spin" />{/if}
+              {$t("settings.sync.confirmUndo")}
+            </button>
+          {:else}
+            <button
+              class="settings-button"
+              type="button"
+              onclick={() => (confirmUndo = true)}
+              disabled={busy !== null}
+            >
+              {$t("settings.sync.undo")}
+            </button>
+          {/if}
+        {/if}
+        <button
+          class="settings-button"
+          type="button"
+          onclick={toggleHistory}
+          disabled={busy !== null}
+        >
+          {#if busy === "history"}<Loader2 size={13} class="animate-spin" />{/if}
+          {history ? $t("settings.sync.hideHistory") : $t("settings.sync.showHistory")}
+        </button>
+      </SettingsRow>
     </div>
+
+    {#if confirmUndo}
+      <p class="text-base-content-muted px-1 text-xs">{$t("settings.sync.undoHint")}</p>
+    {/if}
+
+    {#if history}
+      <div class="space-y-2">
+        <h3 class="text-base-content-subtle px-1 text-[11px] font-medium tracking-wide uppercase">
+          {$t("settings.sync.historyTitle")}
+        </h3>
+        <ul class="settings-card px-4 py-2 text-[13px]">
+          {#each history as commit (commit.id)}
+            <li class="flex items-center justify-between gap-4 py-1.5">
+              <span class="min-w-0">
+                <span class="text-base-content block truncate">{commit.message}</span>
+                <span class="text-base-content-muted block text-xs">
+                  {formatTime(commit.time)} · {shortId(commit.id)}
+                </span>
+              </span>
+              <button
+                class="settings-button shrink-0"
+                type="button"
+                onclick={() => previewCommit(commit)}
+                disabled={busy !== null}
+              >
+                {$t("settings.sync.restoreThis")}
+              </button>
+            </li>
+          {/each}
+        </ul>
+      </div>
+    {/if}
+
+    {#if plan && showPlan}
+      {#key `${plan.mode}:${plan.target ?? ""}:${plan.fingerprint}:${plan.remoteHead ?? ""}`}
+        <LibraryRestorePanel
+          {plan}
+          busy={busy !== null}
+          targetLabel={plan.target ? shortId(plan.target) : ""}
+          onChooseMode={chooseMode}
+          onApply={applyRestore}
+          onCancel={() => (showPlan = false)}
+        />
+      {/key}
+    {/if}
 
     {#if confirmDisconnect}
       <p class="text-base-content-muted px-1 text-xs">{$t("settings.sync.disconnectHint")}</p>
@@ -364,19 +548,6 @@
         </h3>
         <ul class="settings-card px-4 py-2 text-[13px]">
           {#each status.changes as change (`${change.kind}:${change.id}`)}
-            <li class="text-base-content py-1">{changeLabel(change)}</li>
-          {/each}
-        </ul>
-      </div>
-    {/if}
-
-    {#if remote?.remoteAhead && remote.changes.length > 0}
-      <div class="space-y-2">
-        <h3 class="text-base-content-subtle px-1 text-[11px] font-medium tracking-wide uppercase">
-          {$t("settings.sync.remoteChangesTitle")}
-        </h3>
-        <ul class="settings-card px-4 py-2 text-[13px]">
-          {#each remote.changes as change (`${change.kind}:${change.id}`)}
             <li class="text-base-content py-1">{changeLabel(change)}</li>
           {/each}
         </ul>

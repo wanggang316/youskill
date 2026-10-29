@@ -30,6 +30,14 @@ export interface SyncStatus {
   /** Skills left out of the backup (a file over 50 MB, a missing hub copy). */
   skipped: string[];
   libraryEmpty: boolean;
+  /** The checkpoint of the last restore, which `undoLibraryRestore` puts back. */
+  checkpoint?: RestoreCheckpoint;
+}
+
+export interface RestoreCheckpoint {
+  createdAt: string;
+  /** The commit the restore applied. */
+  target: string;
 }
 
 export type BackupResult =
@@ -46,20 +54,70 @@ export interface BackupOutcome {
   skipped: string[];
 }
 
-export type PullResult = "pulled" | "up_to_date" | "remote_empty" | "diverged" | "local_not_empty";
+/** `pull` merges against the last synced commit; the other modes are for a first connect. */
+export type RestoreMode = "pull" | "merge" | "replace_local" | "replace_remote";
+export type FirstConnectMode = Exclude<RestoreMode, "pull">;
+export type ItemChange = "unchanged" | "added" | "modified" | "removed";
+export type Resolution = "keep_local" | "take_remote" | "conflict" | "removal_candidate";
+export type MatchReason = "hash" | "source_key";
+export type PlanState = "ready" | "up_to_date" | "remote_empty" | "choose_mode";
 
-export interface PullOutcome {
-  result: PullResult;
-  commit?: string;
-  changes: LibraryChange[];
-  errors: string[];
-  agentsChanged: boolean;
+export interface RestoreItem {
+  /** `skill:<id>`, `instruction:<id>` or `agents`. */
+  key: string;
+  kind: SyncItemKind;
+  id: string;
+  name: string;
+  /** Local id of an item paired with a repository item of another id. */
+  localId?: string;
+  localName?: string;
+  localChange: ItemChange;
+  remoteChange: ItemChange;
+  resolution: Resolution;
+  matchReason?: MatchReason;
+  /** Left out of an earlier restore; excluded unless included again. */
+  deferred: boolean;
 }
 
-export interface RemoteCheck {
-  remoteAhead: boolean;
-  remoteHasLibrary: boolean;
-  changes: LibraryChange[];
+export interface RestorePlan {
+  state: PlanState;
+  mode: RestoreMode;
+  target: string | null;
+  targetCommit: string | null;
+  remoteHead: string | null;
+  fingerprint: string;
+  items: RestoreItem[];
+}
+
+export type ConflictChoice = "keep_local" | "take_remote" | "keep_both";
+export type RemovalChoice = "remove" | "keep";
+
+export interface RestoreDecisions {
+  conflicts: Record<string, ConflictChoice>;
+  removals: Record<string, RemovalChoice>;
+  /** Include (`true`) or exclude a `take_remote` item. */
+  include: Record<string, boolean>;
+}
+
+export interface RestoreOptions {
+  applyInstalls: boolean;
+}
+
+export interface RestoreOutcome {
+  result: "applied" | "stale";
+  commit?: string;
+  pushed: boolean;
+  localApplied: boolean;
+  errors: string[];
+  agentsChanged: boolean;
+  installs?: ApplyPendingOutcome;
+}
+
+export interface RemoteCommit {
+  id: string;
+  tree: string;
+  time: string;
+  message: string;
 }
 
 export type PendingAction = "install" | "uninstall" | "update";
@@ -95,12 +153,28 @@ export async function backupLibrary(): Promise<BackupOutcome> {
   return apiCall<BackupOutcome>("library_sync_backup");
 }
 
-export async function checkLibraryRemote(): Promise<RemoteCheck> {
-  return apiCall<RemoteCheck>("library_sync_check_remote");
+/** `target` is a commit from `listLibraryHistory`; `null` is the branch head. */
+export async function planLibraryRestore(
+  mode: RestoreMode,
+  target: string | null = null
+): Promise<RestorePlan> {
+  return apiCall<RestorePlan>("library_sync_plan_restore", { mode, target });
 }
 
-export async function pullLibrary(): Promise<PullOutcome> {
-  return apiCall<PullOutcome>("library_sync_pull");
+export async function applyLibraryRestore(
+  plan: RestorePlan,
+  decisions: RestoreDecisions,
+  options: RestoreOptions
+): Promise<RestoreOutcome> {
+  return apiCall<RestoreOutcome>("library_sync_apply_restore", { plan, decisions, options });
+}
+
+export async function undoLibraryRestore(): Promise<void> {
+  return apiCall<void>("library_sync_undo_restore");
+}
+
+export async function listLibraryHistory(): Promise<RemoteCommit[]> {
+  return apiCall<RemoteCommit[]>("library_sync_history");
 }
 
 export async function listLibraryPending(): Promise<PendingItem[]> {
