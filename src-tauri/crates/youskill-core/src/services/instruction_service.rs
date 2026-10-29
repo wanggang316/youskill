@@ -816,7 +816,11 @@ enum Plan {
 
 /// Write the library file to `target`. Returns the effective mode (Windows falls back to a
 /// copy when file symlinks are not permitted).
-fn write_target(hub_file: &Path, target: &Path, mode: InstallMode) -> Result<InstallMode, String> {
+pub(crate) fn write_target(
+  hub_file: &Path,
+  target: &Path,
+  mode: InstallMode,
+) -> Result<InstallMode, String> {
   if target.exists() || is_symlink(target) {
     remove_path_any(target)?;
   }

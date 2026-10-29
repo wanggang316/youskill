@@ -6,7 +6,8 @@ use crate::models::InstallMode;
 use crate::services::agent_apps_service::refresh_local_agent_apps;
 use crate::services::env::Env;
 use crate::services::library_sync_service::{
-  self, ApplyPendingOutcome, BackupOutcome, PendingItem, PullOutcome, RemoteCheck, SyncStatus,
+  self, ApplyPendingOutcome, BackupOutcome, PendingItem, RemoteCommit, RestoreDecisions,
+  RestoreMode, RestoreOptions, RestoreOutcome, RestorePlan, SyncStatus,
 };
 
 async fn blocking<T: Send + 'static>(
@@ -38,21 +39,49 @@ pub async fn library_sync_backup() -> Result<BackupOutcome, String> {
   blocking(|| library_sync_service::backup(&Env::current()?)).await
 }
 
+/// Compare this computer's library with the branch head, or with `target`, an earlier
+/// commit of the branch.
 #[tauri::command]
-pub async fn library_sync_check_remote() -> Result<RemoteCheck, String> {
-  blocking(|| library_sync_service::check_remote(&Env::current()?)).await
+pub async fn library_sync_plan_restore(
+  mode: RestoreMode,
+  target: Option<String>,
+) -> Result<RestorePlan, String> {
+  blocking(move || library_sync_service::plan_restore(&Env::current()?, mode, target.as_deref()))
+    .await
 }
 
+/// Installs use the default install mode from Settings > General.
 #[tauri::command]
-pub async fn library_sync_pull() -> Result<PullOutcome, String> {
-  blocking(|| {
-    let outcome = library_sync_service::pull(&Env::current()?)?;
+pub async fn library_sync_apply_restore(
+  plan: RestorePlan,
+  decisions: RestoreDecisions,
+  options: RestoreOptions,
+) -> Result<RestoreOutcome, String> {
+  blocking(move || {
+    let mode = InstallMode::from_setting(&load_config()?.sync_mode);
+    let outcome =
+      library_sync_service::apply_restore(&Env::current()?, &plan, &decisions, &options, mode)?;
     if outcome.agents_changed {
       refresh_local_agent_apps();
     }
     Ok(outcome)
   })
   .await
+}
+
+#[tauri::command]
+pub async fn library_sync_undo_restore() -> Result<(), String> {
+  blocking(|| {
+    library_sync_service::undo_restore(&Env::current()?)?;
+    refresh_local_agent_apps();
+    Ok(())
+  })
+  .await
+}
+
+#[tauri::command]
+pub async fn library_sync_history() -> Result<Vec<RemoteCommit>, String> {
+  blocking(|| library_sync_service::history(&Env::current()?)).await
 }
 
 #[tauri::command]
