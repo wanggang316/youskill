@@ -12,6 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - The app checks for app updates when the window gets focus and every hour, at most once each hour, and shows the Update button in the top bar when a release is found ([#54](https://github.com/wanggang316/youskill/issues/54)).
+- Favorite marketplace skills from the list or the detail page, without an account, and see them in the new Favorites view of the Marketplace. A favorite whose skill left the marketplace shows as unavailable with its saved name and source and can be removed ([#63](https://github.com/wanggang316/youskill/issues/63)).
 
 ### Changed
 
