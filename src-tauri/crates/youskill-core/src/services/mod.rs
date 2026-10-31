@@ -7,6 +7,8 @@ pub mod avatar_service;
 pub mod diff_service;
 pub mod drift_service;
 pub mod env;
+pub mod favorite_sync_service;
+pub mod favorites_service;
 pub mod github_auth_service;
 pub mod hub_service;
 pub mod install_service;
