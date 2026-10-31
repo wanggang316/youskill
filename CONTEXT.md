@@ -54,3 +54,16 @@ _Avoid_: Quick Open, command palette
 **Filter**:
 A narrowing of the list on the current page only, such as the Library source filter.
 _Avoid_: Search
+
+### Favorites
+
+**Favorite**:
+A marketplace skill that a person marks to revisit, identified by its marketplace id. A hub
+skill is not a favorite. Favorites sync across devices through a server account; see
+`youskill-web/docs/decisions/0001-user-accounts-for-favorite-sync.md`.
+_Avoid_: Bookmark, collection, star
+
+**Local favorite**:
+A favorite stored only on this device. It needs no account and merges into the account at
+sign-in.
+_Avoid_: Guest favorite
