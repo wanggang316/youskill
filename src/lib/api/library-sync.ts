@@ -130,9 +130,15 @@ export interface PendingItem {
   path?: string;
 }
 
+export interface PendingFailure {
+  kind: SyncItemKind;
+  name: string;
+  reason: string;
+}
+
 export interface ApplyPendingOutcome {
   applied: number;
-  failures: string[];
+  failures: PendingFailure[];
 }
 
 export async function getLibrarySyncStatus(): Promise<SyncStatus> {

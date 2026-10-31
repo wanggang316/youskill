@@ -447,6 +447,35 @@ fn backup_then_restore_on_an_empty_computer() {
 }
 
 #[test]
+fn pending_install_over_other_content_reports_the_item() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  install(&a, FOO, &["claude-code"]);
+  backup_with(&a, &repo).unwrap();
+
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  let target = b.home.join(".claude-code/skills/foo");
+  fs::create_dir_all(&target).unwrap();
+  fs::write(target.join("SKILL.md"), "other").unwrap();
+  pull(&b, &repo);
+
+  let items = pending(&b).unwrap();
+  let applied = apply_pending(&b, &items, InstallMode::Copy).unwrap();
+  assert_eq!(applied.applied, 0);
+  assert_eq!(applied.failures.len(), 1, "{:?}", applied.failures);
+  assert_eq!(applied.failures[0].kind, ItemKind::Skill);
+  assert_eq!(applied.failures[0].name, "foo");
+  assert!(applied.failures[0].reason.contains("foo"));
+  assert_eq!(
+    fs::read_to_string(target.join("SKILL.md")).unwrap(),
+    "other"
+  );
+  assert_eq!(pending(&b).unwrap(), items);
+}
+
+#[test]
 fn repository_holds_no_paths_of_this_computer() {
   let tmp = tempfile::tempdir().unwrap();
   let repo = FakeRepo::initialized();

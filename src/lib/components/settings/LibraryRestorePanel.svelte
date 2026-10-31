@@ -11,6 +11,7 @@
   } from "$lib/api";
   import PrimaryActionButton from "$lib/components/ui/PrimaryActionButton.svelte";
   import { t } from "$lib/i18n";
+  import type { RestoreSummary } from "./LibraryRestoreResult.svelte";
 
   /**
    * Body of the restore dialog: the first-connect choice, or the items of a plan with the
@@ -32,7 +33,11 @@
     /** Shown above the footer, next to the action that failed. */
     alert?: Snippet;
     onChooseMode: (mode: FirstConnectMode) => void;
-    onApply: (decisions: RestoreDecisions, options: RestoreOptions) => void;
+    onApply: (
+      decisions: RestoreDecisions,
+      options: RestoreOptions,
+      summary: RestoreSummary
+    ) => void;
     onCancel: () => void;
   } = $props();
 
@@ -117,6 +122,30 @@
     include = Object.fromEntries(incomingItems.map((item) => [item.key, value]));
   }
 
+  function summarize(): RestoreSummary {
+    const summary: RestoreSummary = {
+      incoming: [],
+      both: [],
+      keptLocal: outgoingItems.map(itemName),
+      removed: [],
+      left: [],
+    };
+    for (const item of incomingItems) {
+      (included(item) ? summary.incoming : summary.left).push(itemName(item));
+    }
+    for (const item of removalItems) {
+      (removals[item.key] ? summary.removed : summary.left).push(itemName(item));
+    }
+    for (const item of conflictItems) {
+      const choice = conflicts[item.key];
+      if (choice === "keep_both") summary.both.push(itemName(item));
+      else if (choice === "keep_local") summary.keptLocal.push(itemName(item));
+      else if (item.remoteChange === "removed") summary.removed.push(itemName(item));
+      else summary.incoming.push(itemName(item));
+    }
+    return summary;
+  }
+
   function apply() {
     onApply(
       {
@@ -126,7 +155,8 @@
         ),
         include: Object.fromEntries(incomingItems.map((item) => [item.key, included(item)])),
       },
-      { applyInstalls }
+      { applyInstalls },
+      summarize()
     );
   }
 </script>

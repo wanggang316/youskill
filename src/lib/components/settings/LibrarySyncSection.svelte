@@ -18,6 +18,7 @@
     type GithubAuthStatus,
     type LibraryChange,
     type PendingAction,
+    type PendingFailure,
     type PendingItem,
     type RemoteCommit,
     type RestoreDecisions,
@@ -33,7 +34,12 @@
   import { buildSettingsHref } from "$lib/navigation/app-shell";
   import { agentsById, loadAgents, refreshHub } from "$lib/stores/hub";
   import { refreshInstructions } from "$lib/stores/instructions";
+  import LibraryInstallFailures from "./LibraryInstallFailures.svelte";
   import LibraryRestorePanel from "./LibraryRestorePanel.svelte";
+  import LibraryRestoreResult, {
+    type RestoreResult,
+    type RestoreSummary,
+  } from "./LibraryRestoreResult.svelte";
   import SettingsPane from "./SettingsPane.svelte";
   import SettingsRow from "./SettingsRow.svelte";
 
@@ -48,7 +54,7 @@
     | "undo"
     | "disconnect";
   type Dialog = "restore" | "changes" | "pending" | "history" | "undo" | "disconnect";
-  type Notice = { tone: "success" | "info" | "error"; text: string; details?: string[] };
+  type Notice = { tone: "success" | "info" | "error"; text: string };
 
   const DEFAULT_REPO = "youskill-library";
   const ACTION_ORDER: PendingAction[] = ["install", "update", "uninstall"];
@@ -70,6 +76,12 @@
   let notice = $state<Notice | null>(null);
   /** The open dialog. A notice shows in it while it is open, else under the settings. */
   let dialog = $state<Dialog | null>(null);
+  /** The outcome shown as the last step of the restore dialog. */
+  let restoreResult = $state<RestoreResult | null>(null);
+  /** The restore the result belongs to, to plan it again. */
+  let lastRestore = $state<{ mode: RestorePlan["mode"]; target: string | null } | null>(null);
+  /** Pending installs that the last apply skipped. */
+  let pendingFailures = $state<PendingFailure[]>([]);
 
   const githubReady = $derived(Boolean(github?.gh_installed && github?.selected_login));
   const pendingGroups = $derived(
@@ -102,11 +114,14 @@
 
   function openDialog(next: Dialog) {
     notice = null;
+    pendingFailures = [];
     dialog = next;
   }
 
   const closeDialog = () => {
     dialog = null;
+    restoreResult = null;
+    pendingFailures = [];
   };
 
   async function load() {
@@ -194,6 +209,7 @@
   /** Plan a restore and open it, or report that there is nothing to restore. */
   async function preview(mode: RestorePlan["mode"], target: string | null = null) {
     plan = await planLibraryRestore(mode, target);
+    restoreResult = null;
     if (plan.state === "ready" || plan.state === "choose_mode") {
       dialog = "restore";
       return;
@@ -213,35 +229,43 @@
   const chooseMode = (mode: FirstConnectMode) =>
     run("check", () => preview(mode, plan?.target ?? null));
 
-  const applyRestore = (decisions: RestoreDecisions, options: RestoreOptions) =>
+  const applyRestore = (
+    decisions: RestoreDecisions,
+    options: RestoreOptions,
+    summary: RestoreSummary
+  ) =>
     run("restore", async () => {
-      if (plan) await applyPlan(plan, decisions, options);
+      if (plan) await applyPlan(plan, decisions, options, summary);
     });
 
   async function applyPlan(
     current: RestorePlan,
     decisions: RestoreDecisions,
-    options: RestoreOptions
+    options: RestoreOptions,
+    summary: RestoreSummary
   ) {
+    lastRestore = { mode: current.mode, target: current.target };
+    const checkpointBefore = status?.checkpoint?.createdAt;
     let outcome: RestoreOutcome;
     try {
       outcome = await applyLibraryRestore(current, decisions, options);
     } catch (error) {
       // A restore that stopped part-way may have written items and left a checkpoint.
       await refreshAfterFailure();
-      throw error;
+      restoreResult = {
+        state: "failed",
+        message: errorText(error),
+        canUndo: Boolean(status?.checkpoint) && status?.checkpoint?.createdAt !== checkpointBefore,
+      };
+      return;
     }
     if (outcome.result === "stale" && !outcome.localApplied) {
       await preview(current.mode, current.target);
       notice = { tone: "error", text: $t("settings.sync.restoreStale") };
-    } else if (outcome.result === "stale") {
-      dialog = null;
-      notice = { tone: "error", text: $t("settings.sync.restorePushRejected") };
-    } else {
-      dialog = null;
-      plan = null;
-      notice = restoreNotice(outcome);
+      return;
     }
+    restoreResult = { state: "done", outcome, summary };
+    plan = null;
     if (outcome.localApplied) {
       await reloadLibrary(outcome.agentsChanged);
       await loadPending();
@@ -254,15 +278,15 @@
     status = await getLibrarySyncStatus();
   }
 
-  function restoreNotice(outcome: RestoreOutcome): Notice {
-    const details = outcome.installs?.failures ?? [];
-    const parts = [
-      outcome.pushed ? $t("settings.sync.restoredPushed") : $t("settings.sync.restored"),
-    ];
-    if (outcome.installs) {
-      parts.push($t("settings.sync.pendingApplied", { count: outcome.installs.applied }));
-    }
-    return { tone: details.length ? "error" : "success", text: parts.join(" "), details };
+  const restoreAgain = () =>
+    run("check", () => preview(lastRestore?.mode ?? "pull", lastRestore?.target ?? null));
+
+  function reviewSkipped() {
+    pendingFailures =
+      restoreResult?.state === "done" ? (restoreResult.outcome.installs?.failures ?? []) : [];
+    restoreResult = null;
+    notice = null;
+    dialog = "pending";
   }
 
   const showHistory = () =>
@@ -279,9 +303,14 @@
         await undoLibraryRestore();
       } catch (error) {
         await refreshAfterFailure();
+        if (restoreResult) {
+          restoreResult = { state: "failed", message: errorText(error), canUndo: true };
+          return;
+        }
         throw error;
       }
       dialog = null;
+      restoreResult = null;
       plan = null;
       notice = { tone: "success", text: $t("settings.sync.undone") };
       await reloadLibrary(true);
@@ -297,13 +326,8 @@
       await reloadLibrary();
       await loadPending();
       status = await getLibrarySyncStatus();
-      if (outcome.failures.length) {
-        notice = {
-          tone: "error",
-          text: $t("settings.sync.pendingPartly", { count: outcome.applied }),
-          details: outcome.failures,
-        };
-      } else {
+      pendingFailures = outcome.failures;
+      if (outcome.failures.length === 0) {
         dialog = null;
         notice = {
           tone: "success",
@@ -367,13 +391,6 @@
       }`}
     >
       <p>{notice.text}</p>
-      {#if notice.details?.length}
-        <ul class="mt-1 list-disc pl-5 text-xs">
-          {#each notice.details as detail, index (index)}
-            <li>{detail}</li>
-          {/each}
-        </ul>
-      {/if}
     </div>
   {/if}
 {/snippet}
@@ -556,13 +573,22 @@
 </SettingsPane>
 
 <Modal
-  open={dialog === "restore" && plan !== null}
-  title={restoreTitle(plan)}
+  open={dialog === "restore" && (plan !== null || restoreResult !== null)}
+  title={restoreResult ? $t("settings.sync.restore.title") : restoreTitle(plan)}
   onClose={closeDialog}
   showCloseButton={busy === null}
   containerClass="max-w-2xl"
 >
-  {#if plan}
+  {#if restoreResult}
+    <LibraryRestoreResult
+      result={restoreResult}
+      busy={busy !== null}
+      onDone={closeDialog}
+      onUndo={undo}
+      onRetry={restoreAgain}
+      onReviewPending={reviewSkipped}
+    />
+  {:else if plan}
     {#key `${plan.mode}:${plan.target ?? ""}:${plan.fingerprint}:${plan.remoteHead ?? ""}`}
       <LibraryRestorePanel
         {plan}
@@ -625,6 +651,9 @@
     <p class="text-base-content-muted text-xs leading-relaxed">
       {$t("settings.sync.pendingHint")}
     </p>
+    {#if pendingFailures.length > 0}
+      <LibraryInstallFailures failures={pendingFailures} />
+    {/if}
     {@render noticeView(true)}
     {#each pendingGroups as group (group.action)}
       <section>

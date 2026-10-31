@@ -319,7 +319,16 @@ pub struct PendingItem {
 #[serde(rename_all = "camelCase")]
 pub struct ApplyPendingOutcome {
   pub applied: usize,
-  pub failures: Vec<String>,
+  pub failures: Vec<PendingFailure>,
+}
+
+/// A pending item that was not applied, and why.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingFailure {
+  pub kind: ItemKind,
+  pub name: String,
+  pub reason: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -1573,10 +1582,16 @@ pub fn apply_pending(
     };
     match result {
       Ok((true, _)) => outcome.applied += group.len(),
-      Ok((false, blockers)) => outcome
-        .failures
-        .extend(blockers.into_iter().map(|b| format!("{}: {}", name, b))),
-      Err(err) => outcome.failures.push(format!("{}: {}", name, err)),
+      Ok((false, blockers)) => {
+        outcome
+          .failures
+          .extend(blockers.into_iter().map(|reason| PendingFailure {
+            kind,
+            name: name.clone(),
+            reason,
+          }))
+      },
+      Err(reason) => outcome.failures.push(PendingFailure { kind, name, reason }),
     }
   }
   Ok(outcome)
