@@ -730,9 +730,10 @@ pub fn accept_hub(env: &Env, name: &str) -> Result<InstructionActionResult, Stri
 }
 
 /// Remove an instruction from the library. With `remove_installs = false`, symlink targets
-/// become real files first so agents keep reading them.
+/// become real files first so agents keep reading them. Runs inside a caller's operation (a
+/// library restore) without taking the lock again.
 pub fn remove_instruction(env: &Env, name: &str, remove_installs: bool) -> Result<(), String> {
-  let _ops = ops_guard(env)?;
+  let _ops = lock_service::ops_guard_unless_held(&env.youskill_root)?;
   let record = get_record(env, name)?;
   let hub_file = env.instruction_file(name);
   let mut errors = Vec::new();
@@ -816,7 +817,11 @@ enum Plan {
 
 /// Write the library file to `target`. Returns the effective mode (Windows falls back to a
 /// copy when file symlinks are not permitted).
-fn write_target(hub_file: &Path, target: &Path, mode: InstallMode) -> Result<InstallMode, String> {
+pub(crate) fn write_target(
+  hub_file: &Path,
+  target: &Path,
+  mode: InstallMode,
+) -> Result<InstallMode, String> {
   if target.exists() || is_symlink(target) {
     remove_path_any(target)?;
   }

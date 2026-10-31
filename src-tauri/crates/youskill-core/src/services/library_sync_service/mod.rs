@@ -6,9 +6,10 @@
 //! paths, project installs, settings and secrets stay on each computer.
 //!
 //! The local lock files stay the source of truth. A backup exports a snapshot of them and
-//! commits it on top of the branch; a pull writes the branch back into the hub. Both only
-//! move forward from the last synced commit: when this computer and the repository both
-//! changed, the result says so and nothing is written.
+//! commits it on top of the branch; it only moves forward from the last synced commit. A
+//! restore (`restore`) merges the branch, or an earlier commit of it, into the hub item by
+//! item and commits the merged result on top of the branch. Repository history is never
+//! rewritten.
 
 use crate::models::{
   AgentApp, InstallMode, InstallRecord, InstallRequest, InstallScope, InstallTargetSpec,
@@ -32,6 +33,17 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
+
+mod checkpoint;
+mod restore;
+
+pub use crate::utils::git_remote::RemoteCommit;
+pub use checkpoint::{undo_restore, CheckpointInfo};
+pub use restore::{
+  apply_restore, apply_restore_with, history, history_with, plan_restore, plan_restore_with,
+  ConflictChoice, ItemChange, MatchReason, PlanState, RemovalChoice, Resolution, RestoreDecisions,
+  RestoreItem, RestoreMode, RestoreOptions, RestoreOutcome, RestorePlan, RestoreResult,
+};
 
 /// Local sync state, next to the lock files. Never synced.
 pub const SYNC_STATE_FILE: &str = ".sync-state.json";
@@ -135,6 +147,10 @@ pub struct SyncState {
   /// agents it never had.
   #[serde(default)]
   pub base_local_agents: BTreeMap<String, Vec<String>>,
+  /// Remote items the user left out of a restore, by item key, with the version they had.
+  /// A backup carries this version forward instead of the local one.
+  #[serde(default)]
+  pub deferred: BTreeMap<String, ItemVersion>,
 }
 
 impl SyncState {
@@ -152,6 +168,7 @@ impl SyncState {
     self.base_files.clear();
     self.base_library = None;
     self.base_local_agents.clear();
+    self.deferred.clear();
   }
 }
 
@@ -245,6 +262,9 @@ pub struct SyncStatus {
   /// Skills left out of the backup (a file over 50 MB, a missing hub copy).
   pub skipped: Vec<String>,
   pub library_empty: bool,
+  /// The checkpoint of the last restore, which `undo_restore` puts back.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub checkpoint: Option<CheckpointInfo>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -268,43 +288,6 @@ pub struct BackupOutcome {
   pub commit: Option<String>,
   pub changes: Vec<LibraryChange>,
   pub skipped: Vec<String>,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum PullResult {
-  Pulled,
-  UpToDate,
-  /// The repository holds no library yet.
-  RemoteEmpty,
-  /// Both changed since the last sync.
-  Diverged,
-  /// First pull into a library that already has content.
-  LocalNotEmpty,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct PullOutcome {
-  pub result: PullResult,
-  #[serde(default, skip_serializing_if = "Option::is_none")]
-  pub commit: Option<String>,
-  /// What the pull brought in.
-  pub changes: Vec<LibraryChange>,
-  /// Removals that failed; the rest of the pull is applied.
-  pub errors: Vec<String>,
-  /// The custom agent definitions changed; agent lists need a refresh.
-  pub agents_changed: bool,
-}
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct RemoteCheck {
-  /// The repository has commits this computer has not pulled.
-  pub remote_ahead: bool,
-  pub remote_has_library: bool,
-  /// What a pull would bring in.
-  pub changes: Vec<LibraryChange>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -346,6 +329,8 @@ pub struct ApplyPendingOutcome {
 struct Snapshot {
   /// Repository path -> (mode, content).
   contents: BTreeMap<String, (String, Vec<u8>)>,
+  /// Files carried forward from the repository without local content (deferred items).
+  carried: BTreeMap<String, TreeFile>,
   library: LibraryFile,
   local_agents: BTreeMap<String, Vec<String>>,
   skipped: Vec<String>,
@@ -353,20 +338,244 @@ struct Snapshot {
 
 impl Snapshot {
   fn tree(&self) -> BTreeMap<String, TreeFile> {
+    let mut tree = self.carried.clone();
+    tree.extend(self.contents.iter().map(|(path, (mode, content))| {
+      (
+        path.clone(),
+        TreeFile {
+          mode: mode.clone(),
+          sha: blob_sha(content),
+        },
+      )
+    }));
+    tree
+  }
+
+  /// Replace the local version of each deferred item with the repository version it had,
+  /// so a deferred item is neither a local change nor removed by the next backup.
+  fn carry_deferred(&mut self, deferred: &BTreeMap<String, ItemVersion>) {
+    for (key, version) in deferred {
+      let Some((kind, id)) = split_key(key) else {
+        continue;
+      };
+      let prefix = match kind {
+        ItemKind::Skill => {
+          self.library.skills.remove(id);
+          format!("{}/{}/", SKILLS_DIR, id)
+        },
+        ItemKind::Instruction => {
+          self.library.instructions.remove(id);
+          format!("{}/{}.md", INSTRUCTIONS_DIR, id)
+        },
+        ItemKind::Agents => AGENTS_FILE.to_string(),
+      };
+      self.contents.retain(|path, _| !path.starts_with(&prefix));
+      match &version.entry {
+        Entry::Skill(skill) => {
+          self.library.skills.insert(id.to_string(), skill.clone());
+        },
+        Entry::Instruction(instruction) => {
+          self
+            .library
+            .instructions
+            .insert(id.to_string(), instruction.clone());
+        },
+        Entry::Agents => {},
+      }
+      self.carried.extend(version.paths(id));
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Items
+// ---------------------------------------------------------------------------
+
+const AGENTS_KEY: &str = "agents";
+
+/// The library entry of an item, or the custom agents file, which has none.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum Entry {
+  Skill(LibrarySkill),
+  Instruction(LibraryInstruction),
+  Agents,
+}
+
+/// One item in one state of the library: its entry and its files, by path below the item
+/// (inside `skills/<id>/<name>/`; empty for a one-file item).
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+pub struct ItemVersion {
+  entry: Entry,
+  files: BTreeMap<String, TreeFile>,
+}
+
+impl ItemVersion {
+  fn kind(&self) -> ItemKind {
+    match self.entry {
+      Entry::Skill(_) => ItemKind::Skill,
+      Entry::Instruction(_) => ItemKind::Instruction,
+      Entry::Agents => ItemKind::Agents,
+    }
+  }
+
+  fn name(&self) -> String {
+    match &self.entry {
+      Entry::Skill(skill) => skill.name.clone(),
+      Entry::Instruction(instruction) => instruction.name.clone(),
+      Entry::Agents => String::new(),
+    }
+  }
+
+  /// The entry without the user-level agents, which merge per agent and never conflict.
+  fn shared_entry(&self) -> Entry {
+    match &self.entry {
+      Entry::Skill(skill) => Entry::Skill(LibrarySkill {
+        agents: Vec::new(),
+        ..skill.clone()
+      }),
+      Entry::Instruction(instruction) => Entry::Instruction(LibraryInstruction {
+        agents: Vec::new(),
+        ..instruction.clone()
+      }),
+      Entry::Agents => Entry::Agents,
+    }
+  }
+
+  fn same_content(&self, other: &ItemVersion) -> bool {
+    self.files == other.files && self.shared_entry() == other.shared_entry()
+  }
+
+  /// Equal files, name and source: two versions that only differ in hash and timestamps,
+  /// as two computers that made the same edit produce.
+  fn same_except_times(&self, other: &ItemVersion) -> bool {
+    let strip = |entry: Entry| match entry {
+      Entry::Skill(skill) => Entry::Skill(LibrarySkill {
+        hash: String::new(),
+        imported_at: String::new(),
+        updated_at: String::new(),
+        ..skill
+      }),
+      Entry::Instruction(instruction) => Entry::Instruction(LibraryInstruction {
+        hash: String::new(),
+        imported_at: String::new(),
+        updated_at: String::new(),
+        ..instruction
+      }),
+      Entry::Agents => Entry::Agents,
+    };
+    self.files == other.files && strip(self.shared_entry()) == strip(other.shared_entry())
+  }
+
+  /// The source key that pairs items on a first merge: a GitHub or folder source.
+  fn source_key(&self) -> Option<String> {
+    match &self.entry {
+      Entry::Skill(skill) => match &skill.source {
+        SkillSource::Github { .. } | SkillSource::Folder { .. } => Some(skill.source.key()),
+        _ => None,
+      },
+      Entry::Instruction(instruction) => match &instruction.source {
+        InstructionSource::Github {
+          repo,
+          file_path,
+          branch,
+        } => Some(format!(
+          "github:{}@{}:{}",
+          repo.trim().to_ascii_lowercase(),
+          branch.as_deref().unwrap_or_default(),
+          file_path.trim_matches('/')
+        )),
+        _ => None,
+      },
+      Entry::Agents => None,
+    }
+  }
+
+  /// Repository paths of the item's files.
+  fn paths(&self, id: &str) -> BTreeMap<String, TreeFile> {
     self
-      .contents
+      .files
       .iter()
-      .map(|(path, (mode, content))| {
-        (
-          path.clone(),
-          TreeFile {
-            mode: mode.clone(),
-            sha: blob_sha(content),
-          },
-        )
+      .map(|(relative, file)| {
+        let path = match &self.entry {
+          Entry::Skill(skill) => format!("{}/{}/{}/{}", SKILLS_DIR, id, skill.name, relative),
+          Entry::Instruction(_) => format!("{}/{}.md", INSTRUCTIONS_DIR, id),
+          Entry::Agents => AGENTS_FILE.to_string(),
+        };
+        (path, file.clone())
       })
       .collect()
   }
+}
+
+fn split_key(key: &str) -> Option<(ItemKind, &str)> {
+  if key == AGENTS_KEY {
+    return Some((ItemKind::Agents, AGENTS_FILE));
+  }
+  if let Some(id) = key.strip_prefix("skill:") {
+    return Some((ItemKind::Skill, id));
+  }
+  key
+    .strip_prefix("instruction:")
+    .map(|id| (ItemKind::Instruction, id))
+}
+
+fn empty_agents_file() -> TreeFile {
+  TreeFile {
+    mode: MODE_FILE.to_string(),
+    sha: blob_sha(&agents_json(&[]).unwrap_or_default()),
+  }
+}
+
+/// Every item of one state of the library, by item key. The custom agents file is always
+/// an item; a missing file counts as an empty list.
+fn item_versions(
+  library: &LibraryFile,
+  files: &BTreeMap<String, TreeFile>,
+) -> BTreeMap<String, ItemVersion> {
+  let mut items = BTreeMap::new();
+  for (id, skill) in &library.skills {
+    let prefix = format!("{}/{}/{}/", SKILLS_DIR, id, skill.name);
+    let item_files = files
+      .range(prefix.clone()..)
+      .take_while(|(path, _)| path.starts_with(&prefix))
+      .map(|(path, file)| (path[prefix.len()..].to_string(), file.clone()))
+      .collect();
+    items.insert(
+      skill_key(id),
+      ItemVersion {
+        entry: Entry::Skill(skill.clone()),
+        files: item_files,
+      },
+    );
+  }
+  for (id, instruction) in &library.instructions {
+    let path = format!("{}/{}.md", INSTRUCTIONS_DIR, id);
+    let item_files = files
+      .get(&path)
+      .map(|file| (String::new(), file.clone()))
+      .into_iter()
+      .collect();
+    items.insert(
+      instruction_key(id),
+      ItemVersion {
+        entry: Entry::Instruction(instruction.clone()),
+        files: item_files,
+      },
+    );
+  }
+  let agents = files
+    .get(AGENTS_FILE)
+    .cloned()
+    .unwrap_or_else(empty_agents_file);
+  items.insert(
+    AGENTS_KEY.to_string(),
+    ItemVersion {
+      entry: Entry::Agents,
+      files: BTreeMap::from([(String::new(), agents)]),
+    },
+  );
+  items
 }
 
 fn skill_key(id: &str) -> String {
@@ -594,6 +803,7 @@ fn local_snapshot(env: &Env, state: &SyncState) -> Result<Snapshot, String> {
   let base = state.base_library.as_ref();
   let mut snapshot = Snapshot {
     contents: BTreeMap::new(),
+    carried: BTreeMap::new(),
     library: LibraryFile::default(),
     local_agents: BTreeMap::new(),
     skipped: Vec::new(),
@@ -694,6 +904,7 @@ fn local_snapshot(env: &Env, state: &SyncState) -> Result<Snapshot, String> {
       agents_json(&read_user_agent_apps(env)?)?,
     ),
   );
+  snapshot.carry_deferred(&state.deferred);
   snapshot.contents.insert(
     LIBRARY_FILE.to_string(),
     (MODE_FILE.to_string(), library_json(&snapshot.library)?),
@@ -853,6 +1064,7 @@ pub fn status(env: &Env) -> Result<SyncStatus, String> {
       changes: Vec::new(),
       skipped: Vec::new(),
       library_empty,
+      checkpoint: None,
     });
   }
   let snapshot = local_snapshot(env, &state)?;
@@ -873,6 +1085,7 @@ pub fn status(env: &Env) -> Result<SyncStatus, String> {
     changes,
     skipped: snapshot.skipped,
     library_empty,
+    checkpoint: checkpoint::info(env),
   })
 }
 
@@ -1002,6 +1215,7 @@ pub fn disconnect(env: &Env) -> Result<(), String> {
   if staging.exists() {
     let _ = remove_path_any(&staging);
   }
+  checkpoint::discard(env);
   Ok(())
 }
 
@@ -1028,6 +1242,32 @@ fn commit_message(device: &str, changes: &[LibraryChange]) -> String {
     count(ChangeKind::Modified),
     count(ChangeKind::Removed)
   )
+}
+
+/// Upload every file of `tree` whose blob is not in one of the `known` trees.
+fn upload_blobs(
+  remote: &dyn RemoteRepo,
+  snapshot: &Snapshot,
+  tree: &BTreeMap<String, TreeFile>,
+  known: &[&BTreeMap<String, TreeFile>],
+) -> Result<(), String> {
+  let known: BTreeSet<&String> = known
+    .iter()
+    .flat_map(|files| files.values().map(|file| &file.sha))
+    .collect();
+  for (path, file) in tree {
+    if known.contains(&file.sha) {
+      continue;
+    }
+    let Some((_, content)) = snapshot.contents.get(path) else {
+      return Err(format!("The repository no longer has {}", path));
+    };
+    let sha = remote.create_blob(content)?;
+    if sha != file.sha {
+      return Err(format!("GitHub stored {} with an unexpected id", path));
+    }
+  }
+  Ok(())
 }
 
 pub fn backup_with(env: &Env, remote: &dyn RemoteRepo) -> Result<BackupOutcome, String> {
@@ -1081,17 +1321,7 @@ pub fn backup_with(env: &Env, remote: &dyn RemoteRepo) -> Result<BackupOutcome, 
     },
   }
 
-  let known: BTreeSet<&String> = remote_files.values().map(|file| &file.sha).collect();
-  for (path, file) in &tree {
-    if known.contains(&file.sha) {
-      continue;
-    }
-    let (_, content) = &snapshot.contents[path];
-    let sha = remote.create_blob(content)?;
-    if sha != file.sha {
-      return Err(format!("GitHub stored {} with an unexpected id", path));
-    }
-  }
+  upload_blobs(remote, &snapshot, &tree, &[&remote_files])?;
   let device = state
     .device_name
     .clone()
@@ -1115,413 +1345,6 @@ pub fn backup_with(env: &Env, remote: &dyn RemoteRepo) -> Result<BackupOutcome, 
   state.base_local_agents = snapshot.local_agents.clone();
   write_state(env, &state)?;
   Ok(outcome(BackupResult::Pushed, Some(commit), changes))
-}
-
-// ---------------------------------------------------------------------------
-// Pull
-// ---------------------------------------------------------------------------
-
-pub fn check_remote(env: &Env) -> Result<RemoteCheck, String> {
-  let remote = github_remote(env)?;
-  check_remote_with(env, &remote)
-}
-
-pub fn check_remote_with(env: &Env, remote: &dyn RemoteRepo) -> Result<RemoteCheck, String> {
-  let state = read_state(env)?;
-  state.connected()?;
-  let Some(head) = remote.head()? else {
-    return Ok(RemoteCheck {
-      remote_ahead: false,
-      remote_has_library: false,
-      changes: Vec::new(),
-    });
-  };
-  let files = remote.tree(&head.tree)?;
-  let Some(library_file) = files.get(LIBRARY_FILE) else {
-    return Ok(RemoteCheck {
-      remote_ahead: false,
-      remote_has_library: false,
-      changes: Vec::new(),
-    });
-  };
-  let remote_ahead = state.last_synced_commit.as_deref() != Some(head.commit.as_str());
-  let changes = if remote_ahead {
-    let wanted = BTreeMap::from([(LIBRARY_FILE.to_string(), library_file.clone())]);
-    let content = remote.download(&head.commit, &wanted)?;
-    let library = parse_library(&content[LIBRARY_FILE])?;
-    diff_library(
-      state.base_library.as_ref(),
-      &state.base_files,
-      &library,
-      &files,
-    )
-  } else {
-    Vec::new()
-  };
-  Ok(RemoteCheck {
-    remote_ahead,
-    remote_has_library: true,
-    changes,
-  })
-}
-
-fn parse_library(content: &[u8]) -> Result<LibraryFile, String> {
-  let library: LibraryFile = serde_json::from_slice(content)
-    .map_err(|e| format!("The repository's library.json is not valid: {}", e))?;
-  if library.format != LIBRARY_FORMAT {
-    return Err("The repository is not a YouSkill library".to_string());
-  }
-  if library.version > LIBRARY_VERSION {
-    return Err("The library was written by a newer YouSkill. Update the app first".to_string());
-  }
-  Ok(library)
-}
-
-pub fn pull(env: &Env) -> Result<PullOutcome, String> {
-  let remote = github_remote(env)?;
-  pull_with(env, &remote)
-}
-
-pub fn pull_with(env: &Env, remote: &dyn RemoteRepo) -> Result<PullOutcome, String> {
-  normalize_library(env)?;
-  let outcome =
-    |result: PullResult, commit: Option<String>, changes: Vec<LibraryChange>| PullOutcome {
-      result,
-      commit,
-      changes,
-      errors: Vec::new(),
-      agents_changed: false,
-    };
-
-  let ops = ops_guard(env)?;
-  let mut state = read_state(env)?;
-  state.connected()?;
-  let Some(head) = remote.head()? else {
-    return Ok(outcome(PullResult::RemoteEmpty, None, Vec::new()));
-  };
-  if state.last_synced_commit.as_deref() == Some(head.commit.as_str()) {
-    return Ok(outcome(PullResult::UpToDate, Some(head.commit), Vec::new()));
-  }
-  let remote_files = remote.tree(&head.tree)?;
-  if !remote_files.contains_key(LIBRARY_FILE) {
-    return Ok(outcome(PullResult::RemoteEmpty, None, Vec::new()));
-  }
-
-  let snapshot = local_snapshot(env, &state)?;
-  let local_changes = diff_library(
-    state.base_library.as_ref(),
-    &state.base_files,
-    &snapshot.library,
-    &snapshot.tree(),
-  );
-  if state.last_synced_commit.is_none() {
-    if !library_is_empty(env)? {
-      return Ok(outcome(PullResult::LocalNotEmpty, None, local_changes));
-    }
-  } else if !local_changes.is_empty() {
-    return Ok(outcome(PullResult::Diverged, None, local_changes));
-  }
-
-  let wanted: BTreeMap<String, TreeFile> = remote_files
-    .iter()
-    .filter(|(path, _)| {
-      path.as_str() == LIBRARY_FILE
-        || path.as_str() == AGENTS_FILE
-        || path.starts_with(&format!("{}/", SKILLS_DIR))
-        || path.starts_with(&format!("{}/", INSTRUCTIONS_DIR))
-    })
-    .map(|(path, file)| (path.clone(), file.clone()))
-    .collect();
-  let contents = remote.download(&head.commit, &wanted)?;
-  let library = parse_library(&contents[LIBRARY_FILE])?;
-  let changes = diff_library(
-    state.base_library.as_ref(),
-    &state.base_files,
-    &library,
-    &remote_files,
-  );
-
-  let applied = apply_remote(env, &state, &library, &remote_files, &contents)?;
-
-  let lock = store(env).read()?;
-  let instruction_lock = instruction_service::read_lock(env)?;
-  let mut local_agents = BTreeMap::new();
-  for (id, record) in &lock.skills {
-    let agents = user_agents(&record.installs);
-    if !agents.is_empty() {
-      local_agents.insert(skill_key(id), agents);
-    }
-  }
-  for (id, record) in &instruction_lock.instructions {
-    let agents = user_agents(&record.installs);
-    if !agents.is_empty() {
-      local_agents.insert(instruction_key(id), agents);
-    }
-  }
-  state.last_synced_commit = Some(head.commit.clone());
-  state.last_pull_at = Some(now_rfc3339());
-  state.base_files = remote_files;
-  state.base_library = Some(library);
-  state.base_local_agents = local_agents;
-  write_state(env, &state)?;
-  drop(ops);
-
-  // Removals take the operation lock themselves. Installs stay where they are; symlinks
-  // become real copies.
-  let mut errors = applied.errors;
-  for id in applied.removed_skills {
-    if let Err(err) = hub_service::remove_hub_skill(env, &id, false) {
-      errors.push(err);
-    }
-  }
-  for id in applied.removed_instructions {
-    if let Err(err) = instruction_service::remove_instruction(env, &id, false) {
-      errors.push(err);
-    }
-  }
-  Ok(PullOutcome {
-    result: PullResult::Pulled,
-    commit: Some(head.commit),
-    changes,
-    errors,
-    agents_changed: applied.agents_changed,
-  })
-}
-
-struct Applied {
-  removed_skills: Vec<String>,
-  removed_instructions: Vec<String>,
-  agents_changed: bool,
-  errors: Vec<String>,
-}
-
-/// A repository path split into safe components, or `None` for anything that could leave
-/// the directory it is written into.
-fn safe_components(path: &str) -> Option<Vec<&str>> {
-  let parts: Vec<&str> = path.split('/').collect();
-  let safe = parts.iter().all(|part| {
-    !part.is_empty() && *part != "." && *part != ".." && !part.contains('\\') && !part.contains(':')
-  });
-  safe.then_some(parts)
-}
-
-fn write_entry(path: &Path, mode: &str, content: &[u8]) -> Result<(), String> {
-  if let Some(parent) = path.parent() {
-    fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-  }
-  if mode == MODE_SYMLINK {
-    let target = String::from_utf8_lossy(content).to_string();
-    if create_symlink(&target, path).is_ok() {
-      return Ok(());
-    }
-  }
-  fs::write(path, content).map_err(|e| e.to_string())?;
-  #[cfg(unix)]
-  if mode == MODE_EXEC {
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).map_err(|e| e.to_string())?;
-  }
-  Ok(())
-}
-
-#[cfg(unix)]
-fn create_symlink(target: &str, link: &Path) -> std::io::Result<()> {
-  std::os::unix::fs::symlink(target, link)
-}
-
-#[cfg(windows)]
-fn create_symlink(target: &str, link: &Path) -> std::io::Result<()> {
-  std::os::windows::fs::symlink_file(target.replace('/', "\\"), link)
-}
-
-/// Write the repository's library into the hub and the lock files. Called under the
-/// operation lock; removals are returned for the caller to run after releasing it.
-fn apply_remote(
-  env: &Env,
-  state: &SyncState,
-  library: &LibraryFile,
-  files: &BTreeMap<String, TreeFile>,
-  contents: &BTreeMap<String, Vec<u8>>,
-) -> Result<Applied, String> {
-  let staging = env.youskill_root.join(STAGING_DIR);
-  if staging.exists() {
-    remove_path_any(&staging)?;
-  }
-  fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
-  let mut errors = Vec::new();
-
-  // Assemble each skill in staging.
-  for (path, content) in contents {
-    let Some(parts) = safe_components(path) else {
-      errors.push(format!(
-        "Skipped an unsafe path in the repository: {}",
-        path
-      ));
-      continue;
-    };
-    if parts.len() < 4 || parts[0] != SKILLS_DIR {
-      continue;
-    }
-    let (id, name) = (parts[1], parts[2]);
-    if library.skills.get(id).map(|skill| skill.name.as_str()) != Some(name) {
-      continue;
-    }
-    let mut target = staging.join(id).join(name);
-    for part in &parts[3..] {
-      target = target.join(part);
-    }
-    write_entry(&target, &files[path].mode, content)?;
-  }
-
-  let lock = store(env).read()?;
-  let mut written: Vec<String> = Vec::new();
-  for (id, skill) in &library.skills {
-    if validate_skill_name(&skill.name).is_err() {
-      errors.push(format!(
-        "Skipped a skill with an invalid name: {}",
-        skill.name
-      ));
-      continue;
-    }
-    let staged = staging.join(id).join(&skill.name);
-    if !staged.is_dir() {
-      errors.push(format!("The repository has no files for {}", skill.name));
-      continue;
-    }
-    let target = env.hub_dir(id, &skill.name);
-    let unchanged = target.is_dir()
-      && hash_dir(&target).ok().is_some()
-      && hash_dir(&target).ok() == hash_dir(&staged).ok();
-    if !unchanged {
-      if let Some(record) = lock.skills.get(id) {
-        let old = env.hub_dir(id, &record.name);
-        if record.name != skill.name && old.exists() {
-          trash_dir(env, &old)?;
-        }
-      }
-      if target.exists() {
-        trash_dir(env, &target)?;
-      }
-      move_dir(&staged, &target)?;
-      invalidate_hash_cache(&target);
-    }
-    written.push(id.clone());
-  }
-
-  store(env).update(|lock| {
-    for id in &written {
-      let skill = &library.skills[id];
-      match lock.skills.get_mut(id) {
-        Some(record) => {
-          record.name = skill.name.clone();
-          record.source = merged_source(&record.source, &skill.source);
-          record.hash = skill.hash.clone();
-          record.imported_at = skill.imported_at.clone();
-          record.updated_at = skill.updated_at.clone();
-        },
-        None => {
-          lock.skills.insert(
-            id.clone(),
-            SkillRecord {
-              name: skill.name.clone(),
-              source: skill.source.clone(),
-              hash: skill.hash.clone(),
-              imported_at: skill.imported_at.clone(),
-              updated_at: skill.updated_at.clone(),
-              installs: Vec::new(),
-            },
-          );
-        },
-      }
-    }
-    Ok(())
-  })?;
-
-  let mut instructions_written = Vec::new();
-  for (id, instruction) in &library.instructions {
-    let path = format!("{}/{}.md", INSTRUCTIONS_DIR, id);
-    if safe_components(&path).is_none() {
-      continue;
-    }
-    let Some(content) = contents.get(&path) else {
-      errors.push(format!(
-        "The repository has no file for {}",
-        instruction.name
-      ));
-      continue;
-    };
-    let file = env.instruction_file(id);
-    if fs::read(&file).ok().as_deref() != Some(content.as_slice()) {
-      write_atomic(&file, content)?;
-    }
-    instructions_written.push(id.clone());
-  }
-  instruction_service::update_lock(env, |lock| {
-    for id in &instructions_written {
-      let instruction = &library.instructions[id];
-      match lock.instructions.get_mut(id) {
-        Some(record) => {
-          record.name = instruction.name.clone();
-          record.source = instruction.source.clone();
-          record.hash = instruction.hash.clone();
-          record.imported_at = instruction.imported_at.clone();
-          record.updated_at = instruction.updated_at.clone();
-        },
-        None => {
-          lock.instructions.insert(
-            id.clone(),
-            crate::models::InstructionRecord {
-              name: instruction.name.clone(),
-              source: instruction.source.clone(),
-              hash: instruction.hash.clone(),
-              imported_at: instruction.imported_at.clone(),
-              updated_at: instruction.updated_at.clone(),
-              installs: Vec::new(),
-            },
-          );
-        },
-      }
-    }
-    Ok(())
-  })?;
-
-  let mut agents_changed = false;
-  if let Some(content) = contents.get(AGENTS_FILE) {
-    let mut apps: Vec<AgentApp> = serde_json::from_slice(content)
-      .map_err(|e| format!("The repository's agents.json is not valid: {}", e))?;
-    apps.sort_by(|a, b| a.id.cmp(&b.id));
-    let normalized = agents_json(&apps)?;
-    if agents_json(&read_user_agent_apps(env)?)? != normalized {
-      write_atomic(&user_agent_apps_path(env), &normalized)?;
-      agents_changed = true;
-    }
-  }
-
-  let _ = remove_path_any(&staging);
-
-  let base = state.base_library.clone().unwrap_or_default();
-  let local_lock = store(env).read()?;
-  let local_instructions = instruction_service::read_lock(env)?;
-  let removed_skills = base
-    .skills
-    .keys()
-    .filter(|id| !library.skills.contains_key(*id) && local_lock.skills.contains_key(*id))
-    .cloned()
-    .collect();
-  let removed_instructions = base
-    .instructions
-    .keys()
-    .filter(|id| {
-      !library.instructions.contains_key(*id) && local_instructions.instructions.contains_key(*id)
-    })
-    .cloned()
-    .collect();
-  Ok(Applied {
-    removed_skills,
-    removed_instructions,
-    agents_changed,
-    errors,
-  })
 }
 
 // ---------------------------------------------------------------------------
@@ -1760,489 +1583,4 @@ pub fn apply_pending(
 }
 
 #[cfg(test)]
-mod tests {
-  use super::*;
-  use crate::models::InstructionRecord;
-  use crate::utils::git_remote::RemoteHead;
-  use std::collections::HashMap;
-  use std::sync::Mutex;
-
-  /// An in-memory repository with GitHub's fast-forward-only branch update.
-  #[derive(Default)]
-  struct FakeRepo {
-    inner: Mutex<FakeInner>,
-  }
-
-  #[derive(Default)]
-  struct FakeInner {
-    blobs: HashMap<String, Vec<u8>>,
-    trees: HashMap<String, BTreeMap<String, TreeFile>>,
-    commits: HashMap<String, (String, Option<String>)>,
-    head: Option<String>,
-    counter: u64,
-  }
-
-  impl FakeRepo {
-    /// A new repository with only a README, as GitHub creates it.
-    fn initialized() -> Self {
-      let repo = FakeRepo::default();
-      let readme = b"# lib\n".to_vec();
-      let sha = repo.create_blob(&readme).unwrap();
-      let tree = repo
-        .create_tree(&BTreeMap::from([(
-          "README.md".to_string(),
-          TreeFile {
-            mode: MODE_FILE.to_string(),
-            sha,
-          },
-        )]))
-        .unwrap();
-      let commit = repo.create_commit("init", &tree, None).unwrap();
-      repo.update_head(&commit).unwrap();
-      repo
-    }
-
-    fn head_file(&self, path: &str) -> Option<Vec<u8>> {
-      let inner = self.inner.lock().unwrap();
-      let commit = inner.head.as_ref()?;
-      let tree = &inner.trees[&inner.commits[commit].0];
-      tree.get(path).map(|file| inner.blobs[&file.sha].clone())
-    }
-
-    fn commit_count(&self) -> usize {
-      self.inner.lock().unwrap().commits.len()
-    }
-  }
-
-  impl RemoteRepo for FakeRepo {
-    fn head(&self) -> Result<Option<RemoteHead>, String> {
-      let inner = self.inner.lock().unwrap();
-      Ok(inner.head.as_ref().map(|commit| RemoteHead {
-        commit: commit.clone(),
-        tree: inner.commits[commit].0.clone(),
-      }))
-    }
-
-    fn tree(&self, tree: &str) -> Result<BTreeMap<String, TreeFile>, String> {
-      Ok(self.inner.lock().unwrap().trees[tree].clone())
-    }
-
-    fn download(
-      &self,
-      _commit: &str,
-      files: &BTreeMap<String, TreeFile>,
-    ) -> Result<BTreeMap<String, Vec<u8>>, String> {
-      let inner = self.inner.lock().unwrap();
-      Ok(
-        files
-          .iter()
-          .map(|(path, file)| (path.clone(), inner.blobs[&file.sha].clone()))
-          .collect(),
-      )
-    }
-
-    fn create_blob(&self, content: &[u8]) -> Result<String, String> {
-      let sha = blob_sha(content);
-      self
-        .inner
-        .lock()
-        .unwrap()
-        .blobs
-        .insert(sha.clone(), content.to_vec());
-      Ok(sha)
-    }
-
-    fn create_tree(&self, files: &BTreeMap<String, TreeFile>) -> Result<String, String> {
-      let mut inner = self.inner.lock().unwrap();
-      for (path, file) in files {
-        if !inner.blobs.contains_key(&file.sha) {
-          return Err(format!("missing blob for {}", path));
-        }
-      }
-      inner.counter += 1;
-      let id = format!("tree{}", inner.counter);
-      inner.trees.insert(id.clone(), files.clone());
-      Ok(id)
-    }
-
-    fn create_commit(
-      &self,
-      _message: &str,
-      tree: &str,
-      parent: Option<&str>,
-    ) -> Result<String, String> {
-      let mut inner = self.inner.lock().unwrap();
-      inner.counter += 1;
-      let id = format!("commit{}", inner.counter);
-      inner
-        .commits
-        .insert(id.clone(), (tree.to_string(), parent.map(String::from)));
-      Ok(id)
-    }
-
-    fn update_head(&self, commit: &str) -> Result<(), UpdateError> {
-      let mut inner = self.inner.lock().unwrap();
-      let parent = inner.commits[commit].1.clone();
-      if parent != inner.head {
-        return Err(UpdateError::Rejected);
-      }
-      inner.head = Some(commit.to_string());
-      Ok(())
-    }
-  }
-
-  const FOO: &str = "00000000-0000-4000-8000-000000000001";
-  const BAR: &str = "00000000-0000-4000-8000-000000000002";
-  const NOTE: &str = "00000000-0000-4000-8000-0000000000aa";
-
-  fn app(id: &str) -> AgentApp {
-    AgentApp {
-      id: id.to_string(),
-      display_name: id.to_string(),
-      project_path: Some(format!(".{}/skills", id)),
-      global_path: Some(format!("~/.{}/skills", id)),
-      detect_path: None,
-      profile_path: Some("AGENTS.md".to_string()),
-      global_profile_path: Some(format!("~/.{}/AGENTS.md", id)),
-      is_user_custom: false,
-    }
-  }
-
-  fn computer(root: &Path, name: &str, agents: &[&str]) -> Env {
-    let env = Env::for_test(
-      &root.join(name),
-      agents.iter().map(|id| app(id)).collect(),
-      Vec::new(),
-    );
-    set_connection(&env, "me/youskill-library", "main", name).unwrap();
-    env
-  }
-
-  fn add_skill(env: &Env, id: &str, name: &str, body: &str) {
-    let dir = env.hub_dir(id, name);
-    fs::create_dir_all(dir.join("scripts")).unwrap();
-    fs::write(
-      dir.join("SKILL.md"),
-      format!("---\nname: {}\n---\n{}", name, body),
-    )
-    .unwrap();
-    fs::write(dir.join("scripts/run.sh"), "echo hi\n").unwrap();
-    let hash = hash_dir(&dir).unwrap();
-    store(env)
-      .update(|lock| {
-        lock.skills.insert(
-          id.to_string(),
-          SkillRecord {
-            name: name.to_string(),
-            source: SkillSource::None,
-            hash,
-            imported_at: "2026-10-01T00:00:00Z".to_string(),
-            updated_at: "2026-10-01T00:00:00Z".to_string(),
-            installs: Vec::new(),
-          },
-        );
-        Ok(())
-      })
-      .unwrap();
-  }
-
-  fn edit_skill(env: &Env, id: &str, name: &str, body: &str) {
-    let dir = env.hub_dir(id, name);
-    fs::write(
-      dir.join("SKILL.md"),
-      format!("---\nname: {}\n---\n{}", name, body),
-    )
-    .unwrap();
-    invalidate_hash_cache(&dir);
-    hub_service::accept_hub(env, id).unwrap();
-  }
-
-  fn add_instruction(env: &Env, id: &str, body: &str) {
-    fs::create_dir_all(&env.instructions_root).unwrap();
-    fs::write(env.instruction_file(id), body).unwrap();
-    let hash = crate::utils::hash::hash_file(&env.instruction_file(id)).unwrap();
-    instruction_service::update_lock(env, |lock| {
-      lock.instructions.insert(
-        id.to_string(),
-        InstructionRecord {
-          name: "Shared rules".to_string(),
-          source: InstructionSource::None,
-          hash,
-          imported_at: "2026-10-01T00:00:00Z".to_string(),
-          updated_at: "2026-10-01T00:00:00Z".to_string(),
-          installs: Vec::new(),
-        },
-      );
-      Ok(())
-    })
-    .unwrap();
-  }
-
-  fn install(env: &Env, id: &str, agents: &[&str]) {
-    let result = install_service::install_skill(
-      env,
-      InstallRequest {
-        name: id.to_string(),
-        targets: agents
-          .iter()
-          .map(|agent| InstallTargetSpec {
-            scope: InstallScope::User,
-            project_path: None,
-            agent_id: agent.to_string(),
-          })
-          .collect(),
-        mode: Some(InstallMode::Copy),
-        force: false,
-      },
-    )
-    .unwrap();
-    assert!(result.applied, "{:?}", result.blockers);
-  }
-
-  fn hub_hash(env: &Env, id: &str, name: &str) -> String {
-    hash_dir(&env.hub_dir(id, name)).unwrap()
-  }
-
-  fn library_at_head(repo: &FakeRepo) -> LibraryFile {
-    serde_json::from_slice(&repo.head_file(LIBRARY_FILE).unwrap()).unwrap()
-  }
-
-  #[test]
-  fn backup_then_restore_on_an_empty_computer() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = FakeRepo::initialized();
-    let a = computer(tmp.path(), "a", &["claude-code", "codex"]);
-    add_skill(&a, FOO, "foo", "v1");
-    install(&a, FOO, &["claude-code"]);
-    add_instruction(&a, NOTE, "# rules\n");
-    fs::write(
-      a.config_dir.join(USER_AGENT_APPS_FILE),
-      serde_json::to_string(&vec![AgentApp {
-        is_user_custom: true,
-        ..app("my-agent")
-      }])
-      .unwrap(),
-    )
-    .unwrap();
-
-    let backup = backup_with(&a, &repo).unwrap();
-    assert_eq!(backup.result, BackupResult::Pushed);
-    assert_eq!(backup.changes.len(), 3, "{:?}", backup.changes);
-    assert!(status(&a).unwrap().changes.is_empty());
-
-    let b = computer(tmp.path(), "b", &["claude-code", "codex"]);
-    assert!(status(&b).unwrap().library_empty);
-    let pulled = pull_with(&b, &repo).unwrap();
-    assert_eq!(pulled.result, PullResult::Pulled);
-    assert!(pulled.errors.is_empty(), "{:?}", pulled.errors);
-    assert!(pulled.agents_changed);
-    assert_eq!(hub_hash(&a, FOO, "foo"), hub_hash(&b, FOO, "foo"));
-    assert_eq!(
-      fs::read(b.instruction_file(NOTE)).unwrap(),
-      b"# rules\n".to_vec()
-    );
-    assert!(status(&b).unwrap().changes.is_empty());
-
-    let items = pending(&b).unwrap();
-    assert_eq!(
-      items
-        .iter()
-        .map(|item| (item.action, item.id.as_str(), item.agent_id.as_str()))
-        .collect::<Vec<_>>(),
-      vec![(PendingAction::Install, FOO, "claude-code")]
-    );
-    let applied = apply_pending(&b, &items, InstallMode::Copy).unwrap();
-    assert_eq!(applied.applied, 1, "{:?}", applied.failures);
-    assert!(b.home.join(".claude-code/skills/foo/SKILL.md").is_file());
-    assert!(pending(&b).unwrap().is_empty());
-    assert!(status(&b).unwrap().changes.is_empty());
-    assert_eq!(
-      backup_with(&b, &repo).unwrap().result,
-      BackupResult::UpToDate
-    );
-  }
-
-  #[test]
-  fn repository_holds_no_paths_of_this_computer() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = FakeRepo::initialized();
-    let a = computer(tmp.path(), "a", &["claude-code"]);
-    add_skill(&a, FOO, "foo", "v1");
-    install(&a, FOO, &["claude-code"]);
-    backup_with(&a, &repo).unwrap();
-
-    let library = String::from_utf8(repo.head_file(LIBRARY_FILE).unwrap()).unwrap();
-    assert!(!library.contains(&a.home.to_string_lossy().to_string()));
-    assert_eq!(
-      library_at_head(&repo).skills[FOO].agents,
-      vec!["claude-code"]
-    );
-    assert_eq!(
-      repo.head_file(&format!("skills/{}/foo/scripts/run.sh", FOO)),
-      Some(b"echo hi\n".to_vec())
-    );
-  }
-
-  #[test]
-  fn unchanged_library_makes_no_commit() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = FakeRepo::initialized();
-    let a = computer(tmp.path(), "a", &["claude-code"]);
-    add_skill(&a, FOO, "foo", "v1");
-    backup_with(&a, &repo).unwrap();
-    let commits = repo.commit_count();
-    assert_eq!(
-      backup_with(&a, &repo).unwrap().result,
-      BackupResult::UpToDate
-    );
-    assert_eq!(repo.commit_count(), commits);
-  }
-
-  #[test]
-  fn pull_brings_changes_from_another_computer() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = FakeRepo::initialized();
-    let a = computer(tmp.path(), "a", &["claude-code"]);
-    add_skill(&a, FOO, "foo", "v1");
-    add_skill(&a, BAR, "bar", "v1");
-    backup_with(&a, &repo).unwrap();
-    let b = computer(tmp.path(), "b", &["claude-code"]);
-    pull_with(&b, &repo).unwrap();
-
-    edit_skill(&a, FOO, "foo", "v2");
-    hub_service::remove_hub_skill(&a, BAR, false).unwrap();
-    assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
-
-    let check = check_remote_with(&b, &repo).unwrap();
-    assert!(check.remote_ahead);
-    assert_eq!(check.changes.len(), 2);
-    assert_eq!(
-      backup_with(&b, &repo).unwrap().result,
-      BackupResult::RemoteAhead
-    );
-
-    let pulled = pull_with(&b, &repo).unwrap();
-    assert_eq!(pulled.result, PullResult::Pulled);
-    assert!(pulled.errors.is_empty(), "{:?}", pulled.errors);
-    assert_eq!(hub_hash(&a, FOO, "foo"), hub_hash(&b, FOO, "foo"));
-    assert!(!store(&b).read().unwrap().skills.contains_key(BAR));
-    assert!(status(&b).unwrap().changes.is_empty());
-    assert_eq!(pull_with(&b, &repo).unwrap().result, PullResult::UpToDate);
-  }
-
-  #[test]
-  fn both_sides_changed_writes_nothing() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = FakeRepo::initialized();
-    let a = computer(tmp.path(), "a", &["claude-code"]);
-    add_skill(&a, FOO, "foo", "v1");
-    backup_with(&a, &repo).unwrap();
-    let b = computer(tmp.path(), "b", &["claude-code"]);
-    pull_with(&b, &repo).unwrap();
-
-    edit_skill(&a, FOO, "foo", "from a");
-    backup_with(&a, &repo).unwrap();
-    edit_skill(&b, FOO, "foo", "from b");
-    let before = hub_hash(&b, FOO, "foo");
-
-    assert_eq!(
-      backup_with(&b, &repo).unwrap().result,
-      BackupResult::Diverged
-    );
-    assert_eq!(pull_with(&b, &repo).unwrap().result, PullResult::Diverged);
-    assert_eq!(hub_hash(&b, FOO, "foo"), before);
-  }
-
-  #[test]
-  fn agents_missing_on_this_computer_stay_enabled() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = FakeRepo::initialized();
-    let a = computer(tmp.path(), "a", &["claude-code", "cursor"]);
-    add_skill(&a, FOO, "foo", "v1");
-    install(&a, FOO, &["claude-code", "cursor"]);
-    backup_with(&a, &repo).unwrap();
-
-    // B has no Cursor. It installs for Claude Code and backs up another change.
-    let b = computer(tmp.path(), "b", &["claude-code"]);
-    pull_with(&b, &repo).unwrap();
-    let items = pending(&b).unwrap();
-    assert_eq!(items.len(), 1);
-    apply_pending(&b, &items, InstallMode::Copy).unwrap();
-    add_skill(&b, BAR, "bar", "v1");
-    assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
-    assert_eq!(
-      library_at_head(&repo).skills[FOO].agents,
-      vec!["claude-code", "cursor"]
-    );
-
-    // Uninstalling here disables the agent in the library.
-    install_service::uninstall_skill(
-      &b,
-      UninstallRequest {
-        name: FOO.to_string(),
-        targets: vec![InstallTargetSpec {
-          scope: InstallScope::User,
-          project_path: None,
-          agent_id: "claude-code".to_string(),
-        }],
-        paths: Vec::new(),
-        force: false,
-      },
-    )
-    .unwrap();
-    assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
-    assert_eq!(library_at_head(&repo).skills[FOO].agents, vec!["cursor"]);
-
-    // A pulls: Claude Code is no longer enabled there.
-    pull_with(&a, &repo).unwrap();
-    let items = pending(&a).unwrap();
-    assert_eq!(
-      items
-        .iter()
-        .map(|item| (item.action, item.agent_id.as_str()))
-        .collect::<Vec<_>>(),
-      vec![(PendingAction::Uninstall, "claude-code")]
-    );
-  }
-
-  #[test]
-  fn first_sync_against_an_existing_library_is_refused() {
-    let tmp = tempfile::tempdir().unwrap();
-    let repo = FakeRepo::initialized();
-    let a = computer(tmp.path(), "a", &["claude-code"]);
-    add_skill(&a, FOO, "foo", "v1");
-    backup_with(&a, &repo).unwrap();
-
-    let b = computer(tmp.path(), "b", &["claude-code"]);
-    add_skill(&b, BAR, "bar", "v1");
-    assert_eq!(
-      backup_with(&b, &repo).unwrap().result,
-      BackupResult::RemoteNotEmpty
-    );
-    assert_eq!(
-      pull_with(&b, &repo).unwrap().result,
-      PullResult::LocalNotEmpty
-    );
-    assert!(!store(&b).read().unwrap().skills.contains_key(FOO));
-  }
-
-  #[test]
-  fn effective_agents_apply_only_local_changes() {
-    let base = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-    let base_local = vec!["a".to_string(), "b".to_string()];
-    let now_local = vec!["b".to_string(), "d".to_string()];
-    assert_eq!(
-      effective_agents(Some(&base), Some(&base_local), &now_local),
-      vec!["b", "c", "d"]
-    );
-    assert_eq!(effective_agents(None, None, &now_local), vec!["b", "d"]);
-  }
-
-  #[test]
-  fn unsafe_repository_paths_are_rejected() {
-    assert!(safe_components("skills/x/foo/SKILL.md").is_some());
-    assert!(safe_components("skills/x/../../etc").is_none());
-    assert!(safe_components("/abs").is_none());
-    assert!(safe_components("skills/x/foo/a\\b").is_none());
-  }
-}
+mod tests;

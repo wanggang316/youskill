@@ -16,6 +16,7 @@ Code is the source of truth; when this document and the code disagree, fix the d
   .trash/<name>-<stamp>/  # previous hub copy before a replacement (swept after 7 days)
   .sync-state.json       # library sync: repository, last synced commit and its files (local only)
   .sync-staging/          # pulled skills assembled before they move into the hub
+  .sync-checkpoint/       # copies taken before the last restore, for undo
 
 <config_dir>/youskill/    # app config, custom agent apps, registered projects (unchanged)
 ```
@@ -158,17 +159,63 @@ Data API, no local clone), with the token of the account selected in Settings > 
 without update-check fields, hash, timestamps, and `agents`, the user-level agent ids it is
 enabled for), `agents.json` (custom agents), `skills/<id>/<name>/` and
 `instructions/<id>.md`. No absolute path is written. The lock files stay the source of
-truth: a backup exports a snapshot and commits it on top of the branch, a pull writes the
-branch back into the hub and lock files.
+truth: a backup exports a snapshot and commits it on top of the branch, a restore merges the
+branch, or an earlier commit, back into the hub and lock files.
 
-`.sync-state.json` records the last synced commit, its files and `library.json`, and the
-user-level agents installed at that point. A snapshot's `agents` is the base value plus
-this computer's install changes since then, so agents this computer does not have stay
-enabled. Both directions only fast-forward from the last synced commit; when both sides
-changed, `backup` and `pull` return `diverged` and write nothing. After a pull,
-`pending` lists user-level installs, uninstalls and copy updates that would match the
-library; `apply_pending` runs the selected ones through the normal install actions without
-force. Project installs are not synced.
+`.sync-state.json` records the last synced commit (the base), its files and `library.json`,
+the user-level agents installed at that point, and the deferred items. A snapshot's
+`agents` is the base value plus this computer's install changes since then, so agents this
+computer does not have stay enabled. `backup` only fast-forwards from the base: when the
+repository moved it returns `remote_ahead` or `diverged`, and on a first connect to a
+repository with a library `remote_not_empty`; the user then restores.
+
+Restore is two calls. `plan_restore(mode, target)` compares each item (a hub skill by id,
+an instruction template by id, `agents.json`) in three states: base, local snapshot and the
+target commit (branch head, or a commit from `history`). Equality is the library entry
+without `agents` plus the item's files; `agents` always merges per agent. Changed on one
+side only takes that side (`keep_local`, `take_remote`); changed on both sides to the same
+files, name and source takes the repository's hash and timestamps; otherwise it is a
+`conflict`. A remote removal of an
+item unchanged here is a `removal_candidate`. Modes: `pull`; on a first connect (no base,
+both sides have a library, `pull` returns `choose_mode`) `merge`, `replace_local` (local is
+the base, so the repository wins) and `replace_remote` (the repository is the base, so
+local wins). `merge` and `replace_local` first pair local items with repository items of
+another id: equal files is the same item, an equal GitHub or folder source key with other
+files is a conflict ([ADR 0003](decisions/0003-library-sync-id-on-first-merge.md)). The
+plan carries the head and a fingerprint of the local snapshot.
+
+`apply_restore(plan, decisions, options)` holds the operation lock from the check to the
+commit. It plans again and returns `stale` without writing when the head or the
+fingerprint changed. It then downloads the chosen repository items and assembles them in
+the staging directory; a download failure or a missing or invalid item stops the restore
+before anything local changes. Then it takes the checkpoint, rekeys paired items (hub
+directory or template file, lock record, symlink installs), adds the local copy of a
+`keep_both` item under a new id and a suffixed name (a paired item is rekeyed first, so the
+id and its installs get the repository version; the copy loses its source when it is the
+repository item's), writes the staged items (symlink installs follow a renamed hub
+directory) and runs the confirmed removals through the normal hub and instruction removal.
+Only when all of these succeed is the base set to the target; on a failure the base stays
+and the checkpoint undoes what was written. When the result differs from the head (local
+items, kept removals, `keep_local`, a historical target), it is committed on top of the
+head and the branch fast-forwards; a rejected fast-forward returns `stale` with the local
+result kept. With `applyInstalls`, the install targets of the pending installs and copy
+updates are added to the checkpoint, then the installs run.
+
+Excluded `take_remote` items are deferred: the sync state keeps their repository version,
+local snapshots carry that version instead of the local one (so they are neither a local
+change nor removed by a backup), and the next plan offers them again with `deferred: true`
+(excluded by default) until the repository changes them. The checkpoint copies both lock
+files, the sync state, `user_agent_apps.json`, every hub id directory or template file the
+restore touches and the install targets it writes, plus the symlink installs into them,
+with a fingerprint of each path before and after the restore. `undo_restore` puts them back
+and does not touch the repository. It refuses when a path changed after the restore
+(the skill lock is compared without the source check fields), and it keeps the checkpoint
+until every step succeeded, so a failed undo can be retried. One checkpoint is kept; a new
+one replaces it only when the next restore is about to write.
+
+After a restore, `pending` lists user-level installs, uninstalls and copy updates that would
+match the library; `apply_pending` runs the selected ones through the normal install
+actions without force. Project installs are not synced.
 
 ## Global Search
 
