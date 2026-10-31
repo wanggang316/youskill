@@ -230,7 +230,14 @@
     decisions: RestoreDecisions,
     options: RestoreOptions
   ) {
-    const outcome = await applyLibraryRestore(current, decisions, options);
+    let outcome: RestoreOutcome;
+    try {
+      outcome = await applyLibraryRestore(current, decisions, options);
+    } catch (error) {
+      // A restore that stopped part-way may have written items and left a checkpoint.
+      await refreshAfterFailure();
+      throw error;
+    }
     if (outcome.result === "stale") {
       notice = {
         tone: "error",
@@ -252,8 +259,13 @@
     status = await getLibrarySyncStatus();
   }
 
+  async function refreshAfterFailure() {
+    await reloadLibrary(true);
+    status = await getLibrarySyncStatus();
+  }
+
   function restoreNotice(outcome: RestoreOutcome): Notice {
-    const details = [...outcome.errors, ...(outcome.installs?.failures ?? [])];
+    const details = outcome.installs?.failures ?? [];
     const parts = [
       outcome.pushed ? $t("settings.sync.restoredPushed") : $t("settings.sync.restored"),
     ];
@@ -272,8 +284,13 @@
 
   const undo = () =>
     run("undo", async () => {
-      await undoLibraryRestore();
       confirmUndo = false;
+      try {
+        await undoLibraryRestore();
+      } catch (error) {
+        await refreshAfterFailure();
+        throw error;
+      }
       plan = null;
       showPlan = false;
       notice = { tone: "success", text: $t("settings.sync.undone") };

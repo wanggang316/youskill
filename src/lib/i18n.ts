@@ -88,7 +88,7 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.undo": "Undo restore",
     "settings.sync.confirmUndo": "Confirm undo",
     "settings.sync.undoHint":
-      "Puts back this computer's library as it was before the last restore. The repository is not changed.",
+      "Puts back this computer's library and installs as they were before the last restore. The repository is not changed. Undo stops if something changed after the restore.",
     "settings.sync.undone": "The last restore is undone on this computer.",
     "settings.sync.restore.title": "Restore preview",
     "settings.sync.restore.titleAt": "Restore preview of {target}",
@@ -743,7 +743,8 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.restoreThis": "预览恢复",
     "settings.sync.undo": "撤销恢复",
     "settings.sync.confirmUndo": "确认撤销",
-    "settings.sync.undoHint": "把这台电脑的中心库还原到上次恢复之前。仓库不会被改动。",
+    "settings.sync.undoHint":
+      "把这台电脑的中心库和安装还原到上次恢复之前。仓库不会被改动。恢复之后有改动时，撤销会停止。",
     "settings.sync.undone": "已在这台电脑上撤销上次恢复。",
     "settings.sync.restore.title": "恢复预览",
     "settings.sync.restore.titleAt": "恢复到 {target} 的预览",

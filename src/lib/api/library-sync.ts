@@ -108,7 +108,6 @@ export interface RestoreOutcome {
   commit?: string;
   pushed: boolean;
   localApplied: boolean;
-  errors: string[];
   agentsChanged: boolean;
   installs?: ApplyPendingOutcome;
 }

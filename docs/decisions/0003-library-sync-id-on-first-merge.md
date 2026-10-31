@@ -16,7 +16,7 @@ The repository is the shared library. Other computers that already synced use it
 - A rekey moves the local lock record and the hub directory or template file to the remote id. It keeps the name, install records, and install paths.
 - Replace remote is an explicit choice of the local library. In this mode local ids stay, and the repository items that the local library replaces are removed from the repository.
 - When the same id changed on both sides and the user keeps both, the remote version keeps the id. The local version gets a new id and a suffixed name. If the two versions have the same source key, the local version loses its source, because one source key gives at most one hub skill.
-- The install records stay with the id, which gets the remote version. The local copy starts without installs. When a source-key pair is kept both, the two items already have different ids: no rekey, and the local item loses its source.
+- The install records stay with the id, which gets the remote version. The local copy starts without installs. When a source-key pair is kept both, the local item is first rekeyed to the remote id, so it takes the same path: the remote id keeps the installs and the remote version, and the local version becomes a new item with a suffixed name and no source.
 
 ## Consequences
 
@@ -24,4 +24,4 @@ The glossary exception for ids is limited to the first merge. Code outside libra
 
 ## Verification
 
-Test a first merge with equal hashes (rekey, installs kept), equal source keys with different hashes (conflict), unrelated items (both kept with their own ids), replace remote (local ids kept), and keep both on one id (remote id kept, local copy rekeyed and detached when it shares the source key).
+Test a first merge with equal hashes (rekey, installs kept), equal source keys with different hashes (conflict), unrelated items (both kept with their own ids), replace remote (local ids kept), keep both on one id (remote id kept, local copy under a new id and detached when it shares the source key), and keep both on a source-key pair (the same result as on one id).
