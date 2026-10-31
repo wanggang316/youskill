@@ -9,8 +9,11 @@ import {
 } from "../api/skills";
 
 export type MarketTab = "categories" | "repositories";
+/** `favorites` shows the local favorites instead of a marketplace list. */
+export type MarketView = "browse" | "favorites";
 
 interface MarketState {
+  view: MarketView;
   tab: MarketTab;
   categoryId: number | null;
   repository: string | null;
@@ -41,6 +44,7 @@ export function createMarketplace(
   }
 ) {
   const state = writable<MarketState>({
+    view: "browse",
     tab: "categories",
     categoryId: null,
     repository: null,
@@ -85,7 +89,7 @@ export function createMarketplace(
     if (resetResults) reset();
     const current = get(state);
     if (!resetResults && (current.loading || !current.hasMore)) return;
-    if (current.tab === "repositories" && !current.repository) {
+    if (current.view === "favorites" || (current.tab === "repositories" && !current.repository)) {
       patch({ loaded: true });
       return;
     }
@@ -125,6 +129,8 @@ export function createMarketplace(
     }
   }
 
+  const isBrowsing = () => get(state).view === "browse";
+
   async function loadNavigation() {
     if (get(state).navigationLoading) return;
     patch({ navigationLoading: true, categoriesError: "", repositoriesError: "" });
@@ -149,8 +155,9 @@ export function createMarketplace(
     patch(values);
     const next = get(state);
     if (
-      (next.tab === "categories" && next.categoryId !== current.categoryId) ||
-      (next.tab === "repositories" && next.repository !== current.repository)
+      next.view === "browse" &&
+      ((next.tab === "categories" && next.categoryId !== current.categoryId) ||
+        (next.tab === "repositories" && next.repository !== current.repository))
     ) {
       reset({ query: "" });
       await load();
@@ -170,18 +177,26 @@ export function createMarketplace(
       await load();
     },
     async selectTab(tab: MarketTab) {
-      if (get(state).tab === tab) return;
-      reset({ tab, query: "" });
+      if (isBrowsing() && get(state).tab === tab) return;
+      reset({ view: "browse", tab, query: "" });
       await load();
     },
     async selectCategory(categoryId: number | null) {
-      if (get(state).tab === "categories" && get(state).categoryId === categoryId) return;
-      reset({ tab: "categories", categoryId, query: "" });
+      const current = get(state);
+      if (isBrowsing() && current.tab === "categories" && current.categoryId === categoryId) return;
+      reset({ view: "browse", tab: "categories", categoryId, query: "" });
       await load();
     },
     async selectRepository(repository: string) {
-      if (get(state).tab === "repositories" && get(state).repository === repository) return;
-      reset({ tab: "repositories", repository, query: "" });
+      const current = get(state);
+      if (isBrowsing() && current.tab === "repositories" && current.repository === repository)
+        return;
+      reset({ view: "browse", tab: "repositories", repository, query: "" });
+      await load();
+    },
+    async showFavorites() {
+      if (!isBrowsing()) return;
+      reset({ view: "favorites", query: "" });
       await load();
     },
     setSearch(query: string) {
