@@ -194,8 +194,6 @@ pub struct RestoreOutcome {
   pub pushed: bool,
   /// The hub and lock files were changed.
   pub local_applied: bool,
-  /// Item errors; the rest of the restore is applied.
-  pub errors: Vec<String>,
   /// The custom agent definitions changed; agent lists need a refresh.
   pub agents_changed: bool,
   #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -209,7 +207,6 @@ impl RestoreOutcome {
       commit: None,
       pushed: false,
       local_applied,
-      errors: Vec::new(),
       agents_changed: false,
       installs: None,
     }
@@ -298,10 +295,8 @@ fn resolve(
     (ItemChange::Unchanged, _) => Some(Resolution::TakeRemote),
     _ => match (local, remote) {
       (None, None) => None,
-      // Both changed to the same files: only metadata (timestamps, source state) differs.
-      (Some(local), Some(remote))
-        if local.files == remote.files && local.name() == remote.name() =>
-      {
+      // Both made the same change: only the hash and timestamps differ.
+      (Some(local), Some(remote)) if local.same_except_times(remote) => {
         Some(Resolution::TakeRemote)
       },
       _ => Some(Resolution::Conflict),
@@ -535,8 +530,6 @@ struct Actions {
   rekeys: Vec<(String, String)>,
   /// (key, new id): keep the local version of `key` as a new item.
   copies: Vec<(String, String)>,
-  /// Local keys that lose their source.
-  detach: Vec<String>,
   /// Keys whose repository version is written here.
   writes: BTreeSet<String>,
   /// Local keys removed here.
@@ -609,18 +602,15 @@ impl Actions {
                   }
                 ));
               }
-              match paired {
-                // Different ids already: the local item keeps its id and gives up the
-                // source the repository item has.
-                Some(local_key) => actions.detach.push(local_key.clone()),
-                None => {
-                  let new_id = match item.kind {
-                    ItemKind::Skill => new_skill_id(),
-                    _ => uuid::Uuid::new_v4().to_string(),
-                  };
-                  actions.copies.push((key.clone(), new_id));
-                },
-              }
+              // A paired local item first moves to the repository id, so both cases are
+              // the same: the id and its installs get the repository version, the local
+              // version becomes a new item.
+              rekey(&mut actions);
+              let new_id = match item.kind {
+                ItemKind::Skill => new_skill_id(),
+                _ => uuid::Uuid::new_v4().to_string(),
+              };
+              actions.copies.push((key.clone(), new_id));
               actions.writes.insert(key.clone());
             },
           }
@@ -643,8 +633,11 @@ pub fn apply_restore(
 }
 
 /// Apply `plan` with the user's decisions. The plan is computed again and refused as
-/// `stale` when the branch head or this computer's library changed since; a checkpoint is
-/// taken before anything is written.
+/// `stale` when the branch head or this computer's library changed since. The operation
+/// lock is held from the check to the commit. Downloads and checks run before the first
+/// local write; a checkpoint is taken just before it. The new base is recorded only after
+/// every item was written or removed, so a failure leaves the base as it was and the
+/// checkpoint to undo what was written.
 pub fn apply_restore_with(
   env: &Env,
   remote: &dyn RemoteRepo,
@@ -673,6 +666,7 @@ pub fn apply_restore_with(
     return Err("Choose how to combine this library with the repository".to_string());
   }
   let actions = Actions::from_decisions(&planned, decisions)?;
+  let prepared = prepare_remote_items(env, remote, &planned, &target_commit, &actions.writes)?;
 
   let (paths, links) = checkpoint_scope(env, &actions)?;
   checkpoint::take(env, &paths, &links, &target_commit)?;
@@ -689,23 +683,9 @@ pub fn apply_restore_with(
     };
     copy_local(env, key, new_id, detach)?;
   }
-  for key in &actions.detach {
-    detach_source(env, key)?;
-  }
-  let written = write_remote_items(env, remote, &planned, &target_commit, &actions.writes)?;
-
-  let mut next = state.clone();
-  next.last_synced_commit = Some(target_commit.clone());
-  next.last_pull_at = Some(now_rfc3339());
-  next.base_files = planned.target_files.clone();
-  next.base_library = Some(planned.target_library.clone());
-  next.deferred = actions.deferred.clone();
-  write_state(env, &next)?;
-  drop(ops);
-
-  // Removals take the operation lock themselves. Installs stay where they are; symlinks
-  // become real copies.
-  let mut errors = written.errors;
+  let agents_changed = write_prepared(env, &planned, &prepared)?;
+  // Installs stay where they are; symlinks into a removed item become real copies.
+  let mut errors = Vec::new();
   let lock = store(env).read()?;
   let instruction_lock = instruction_service::read_lock(env)?;
   for key in &actions.removals {
@@ -722,22 +702,68 @@ pub fn apply_restore_with(
       errors.push(err);
     }
   }
+  if !errors.is_empty() {
+    return Err(format!(
+      "The restore stopped before it was recorded. Undo it or try again.\n{}",
+      errors.join("\n")
+    ));
+  }
+
+  let mut next = state.clone();
+  next.last_synced_commit = Some(target_commit.clone());
+  next.last_pull_at = Some(now_rfc3339());
+  next.base_files = planned.target_files.clone();
+  next.base_library = Some(planned.target_library.clone());
+  next.deferred = actions.deferred.clone();
+  write_state(env, &next)?;
 
   let mut outcome = commit_result(env, remote, &planned, &head, &target_commit)?;
-  outcome.errors = errors;
-  outcome.agents_changed = written.agents_changed;
+  outcome.agents_changed = agents_changed;
+  checkpoint::seal(env)?;
   if options.apply_installs && outcome.result == RestoreResult::Applied {
     let items: Vec<PendingItem> = pending(env)?
       .into_iter()
       .filter(|item| item.action != PendingAction::Uninstall)
       .collect();
+    // The install targets go into the checkpoint first, so an undo also takes them back.
+    checkpoint::add(env, &install_targets(env, &items))?;
+    // The install actions take the operation lock themselves.
+    drop(ops);
     outcome.installs = Some(apply_pending(env, &items, install_mode)?);
+    let _ops = ops_guard(env)?;
+    checkpoint::seal(env)?;
   }
   Ok(outcome)
 }
 
+/// Where the pending installs and copy updates write.
+fn install_targets(env: &Env, items: &[PendingItem]) -> Vec<PathBuf> {
+  items
+    .iter()
+    .filter_map(|item| {
+      if let Some(path) = &item.path {
+        return Some(PathBuf::from(path));
+      }
+      let spec = InstallTargetSpec {
+        scope: InstallScope::User,
+        project_path: None,
+        agent_id: item.agent_id.clone(),
+      };
+      match item.kind {
+        ItemKind::Skill => install_service::resolve_target(env, &item.name, &spec)
+          .ok()
+          .map(|target| target.path),
+        ItemKind::Instruction => instruction_service::resolve_target(env, &spec)
+          .ok()
+          .map(|target| target.path),
+        ItemKind::Agents => None,
+      }
+    })
+    .collect()
+}
+
 /// Commit this computer's library on top of the branch head when it differs from it, and
-/// make the result the new base.
+/// make the result the new base. Called under the operation lock.
 fn commit_result(
   env: &Env,
   remote: &dyn RemoteRepo,
@@ -745,7 +771,6 @@ fn commit_result(
   head: &RemoteHead,
   target_commit: &str,
 ) -> Result<RestoreOutcome, String> {
-  let _ops = ops_guard(env)?;
   let mut state = read_state(env)?;
   let snapshot = local_snapshot(env, &state)?;
   let tree = snapshot.tree();
@@ -759,7 +784,6 @@ fn commit_result(
     commit: None,
     pushed: false,
     local_applied: true,
-    errors: Vec::new(),
     agents_changed: false,
     installs: None,
   };
@@ -1051,25 +1075,6 @@ fn copy_local(env: &Env, key: &str, new_id: &str, detach: bool) -> Result<(), St
   }
 }
 
-/// Remove the source of a local item, so it no longer shares one with a repository item.
-fn detach_source(env: &Env, key: &str) -> Result<(), String> {
-  match split_key(key) {
-    Some((ItemKind::Skill, id)) => store(env).update(|lock| {
-      if let Some(record) = lock.skills.get_mut(id) {
-        record.source = SkillSource::None;
-      }
-      Ok(())
-    }),
-    Some((ItemKind::Instruction, id)) => instruction_service::update_lock(env, |lock| {
-      if let Some(record) = lock.instructions.get_mut(id) {
-        record.source = InstructionSource::None;
-      }
-      Ok(())
-    }),
-    _ => Ok(()),
-  }
-}
-
 pub(super) fn parse_library(content: &[u8]) -> Result<LibraryFile, String> {
   let library: LibraryFile = serde_json::from_slice(content)
     .map_err(|e| format!("The repository's library.json is not valid: {}", e))?;
@@ -1082,9 +1087,15 @@ pub(super) fn parse_library(content: &[u8]) -> Result<LibraryFile, String> {
   Ok(library)
 }
 
-struct Written {
-  agents_changed: bool,
-  errors: Vec<String>,
+/// The repository items a restore writes, checked and assembled before anything local
+/// changes.
+struct Prepared {
+  /// Skill ids, each assembled in the staging directory.
+  skills: Vec<String>,
+  /// Instruction id -> content.
+  instructions: BTreeMap<String, Vec<u8>>,
+  /// The normalized custom agents file, when it is written.
+  agents: Option<Vec<u8>>,
 }
 
 /// A repository path split into safe components, or `None` for anything that could leave
@@ -1126,15 +1137,16 @@ fn create_symlink(target: &str, link: &Path) -> std::io::Result<()> {
   std::os::windows::fs::symlink_file(target.replace('/', "\\"), link)
 }
 
-/// Write the repository version of the `keys` items into the hub and the lock files. Called
-/// under the operation lock.
-fn write_remote_items(
+/// Download the repository version of the `keys` items and assemble the skills in staging.
+/// Nothing in the hub or the lock files changes yet; any problem with the repository
+/// content stops the restore here.
+fn prepare_remote_items(
   env: &Env,
   remote: &dyn RemoteRepo,
   planned: &Planned,
   commit: &str,
   keys: &BTreeSet<String>,
-) -> Result<Written, String> {
+) -> Result<Prepared, String> {
   let library = &planned.target_library;
   let mut wanted: BTreeMap<String, TreeFile> = BTreeMap::new();
   for key in keys {
@@ -1148,42 +1160,33 @@ fn write_remote_items(
       );
     }
   }
-  let mut agents_changed = false;
-  let mut errors = Vec::new();
   let contents = if wanted.is_empty() {
     BTreeMap::new()
   } else {
     remote.download(commit, &wanted)?
   };
-  let skill_ids: BTreeSet<&str> = keys
-    .iter()
-    .filter_map(|key| key.strip_prefix("skill:"))
-    .collect();
-  let instruction_ids: BTreeSet<&str> = keys
-    .iter()
-    .filter_map(|key| key.strip_prefix("instruction:"))
-    .collect();
+  let mut errors = Vec::new();
+  let mut prepared = Prepared {
+    skills: Vec::new(),
+    instructions: BTreeMap::new(),
+    agents: None,
+  };
 
   let staging = env.youskill_root.join(STAGING_DIR);
   if staging.exists() {
     remove_path_any(&staging)?;
   }
   fs::create_dir_all(&staging).map_err(|e| e.to_string())?;
-
-  // Assemble each skill in staging.
   for (path, content) in &contents {
     let Some(parts) = safe_components(path) else {
-      errors.push(format!(
-        "Skipped an unsafe path in the repository: {}",
-        path
-      ));
+      errors.push(format!("The repository has an unsafe path: {}", path));
       continue;
     };
     if parts.len() < 4 || parts[0] != SKILLS_DIR {
       continue;
     }
     let (id, name) = (parts[1], parts[2]);
-    if !skill_ids.contains(id)
+    if !keys.contains(&skill_key(id))
       || library.skills.get(id).map(|skill| skill.name.as_str()) != Some(name)
     {
       continue;
@@ -1195,48 +1198,111 @@ fn write_remote_items(
     write_entry(&target, &wanted[path].mode, content)?;
   }
 
+  for key in keys {
+    match split_key(key) {
+      Some((ItemKind::Skill, id)) => {
+        let Some(skill) = library.skills.get(id) else {
+          continue;
+        };
+        if validate_skill_name(&skill.name).is_err() {
+          errors.push(format!(
+            "The repository has a skill with an invalid name: {}",
+            skill.name
+          ));
+        } else if !staging.join(id).join(&skill.name).is_dir() {
+          errors.push(format!("The repository has no files for {}", skill.name));
+        } else {
+          prepared.skills.push(id.to_string());
+        }
+      },
+      Some((ItemKind::Instruction, id)) => {
+        let Some(instruction) = library.instructions.get(id) else {
+          continue;
+        };
+        let path = format!("{}/{}.md", INSTRUCTIONS_DIR, id);
+        match contents.get(&path) {
+          Some(content) if safe_components(&path).is_some() => {
+            prepared
+              .instructions
+              .insert(id.to_string(), content.clone());
+          },
+          _ => errors.push(format!(
+            "The repository has no file for {}",
+            instruction.name
+          )),
+        }
+      },
+      Some((ItemKind::Agents, _)) => {
+        let mut apps: Vec<AgentApp> = match contents.get(AGENTS_FILE) {
+          Some(content) => match serde_json::from_slice(content) {
+            Ok(apps) => apps,
+            Err(err) => {
+              errors.push(format!(
+                "The repository's agents.json is not valid: {}",
+                err
+              ));
+              continue;
+            },
+          },
+          None => Vec::new(),
+        };
+        apps.sort_by(|a, b| a.id.cmp(&b.id));
+        prepared.agents = Some(agents_json(&apps)?);
+      },
+      None => {},
+    }
+  }
+  if !errors.is_empty() {
+    let _ = remove_path_any(&staging);
+    return Err(errors.join("\n"));
+  }
+  Ok(prepared)
+}
+
+/// Move the prepared items into the hub and the lock files. Called under the operation
+/// lock. Returns whether the custom agent definitions changed.
+fn write_prepared(env: &Env, planned: &Planned, prepared: &Prepared) -> Result<bool, String> {
+  let library = &planned.target_library;
+  let staging = env.youskill_root.join(STAGING_DIR);
   let lock = store(env).read()?;
-  let mut written: Vec<&str> = Vec::new();
-  for id in &skill_ids {
-    let Some(skill) = library.skills.get(*id) else {
-      continue;
-    };
-    if validate_skill_name(&skill.name).is_err() {
-      errors.push(format!(
-        "Skipped a skill with an invalid name: {}",
-        skill.name
-      ));
-      continue;
-    }
+  for id in &prepared.skills {
+    let skill = &library.skills[id];
     let staged = staging.join(id).join(&skill.name);
-    if !staged.is_dir() {
-      errors.push(format!("The repository has no files for {}", skill.name));
-      continue;
-    }
     let target = env.hub_dir(id, &skill.name);
     let unchanged = target.is_dir()
       && hash_dir(&target).ok().is_some()
       && hash_dir(&target).ok() == hash_dir(&staged).ok();
-    if !unchanged {
-      if let Some(record) = lock.skills.get(*id) {
-        let old = env.hub_dir(id, &record.name);
-        if record.name != skill.name && old.exists() {
-          trash_dir(env, &old)?;
-        }
-      }
-      if target.exists() {
-        trash_dir(env, &target)?;
-      }
-      move_dir(&staged, &target)?;
-      invalidate_hash_cache(&target);
+    if unchanged {
+      continue;
     }
-    written.push(id);
+    // A rename moves the hub directory: symlink installs into the old one follow it.
+    let mut links = Vec::new();
+    if let Some(record) = lock.skills.get(id) {
+      let old = env.hub_dir(id, &record.name);
+      if record.name != skill.name && old.exists() {
+        links = record
+          .installs
+          .iter()
+          .map(|install| PathBuf::from(&install.path))
+          .filter(|link| is_symlink(link) && symlink_points_to(link, &old))
+          .collect();
+        trash_dir(env, &old)?;
+      }
+    }
+    if target.exists() {
+      trash_dir(env, &target)?;
+    }
+    move_dir(&staged, &target)?;
+    invalidate_hash_cache(&target);
+    for link in &links {
+      write_target(&target, link, InstallMode::Symlink)?;
+    }
   }
 
   store(env).update(|lock| {
-    for id in &written {
-      let skill = &library.skills[*id];
-      match lock.skills.get_mut(*id) {
+    for id in &prepared.skills {
+      let skill = &library.skills[id];
+      match lock.skills.get_mut(id) {
         Some(record) => {
           record.name = skill.name.clone();
           record.source = merged_source(&record.source, &skill.source);
@@ -1262,32 +1328,16 @@ fn write_remote_items(
     Ok(())
   })?;
 
-  let mut instructions_written = Vec::new();
-  for id in &instruction_ids {
-    let Some(instruction) = library.instructions.get(*id) else {
-      continue;
-    };
-    let path = format!("{}/{}.md", INSTRUCTIONS_DIR, id);
-    if safe_components(&path).is_none() {
-      continue;
-    }
-    let Some(content) = contents.get(&path) else {
-      errors.push(format!(
-        "The repository has no file for {}",
-        instruction.name
-      ));
-      continue;
-    };
+  for (id, content) in &prepared.instructions {
     let file = env.instruction_file(id);
     if fs::read(&file).ok().as_deref() != Some(content.as_slice()) {
       write_atomic(&file, content)?;
     }
-    instructions_written.push(*id);
   }
   instruction_service::update_lock(env, |lock| {
-    for id in &instructions_written {
-      let instruction = &library.instructions[*id];
-      match lock.instructions.get_mut(*id) {
+    for id in prepared.instructions.keys() {
+      let instruction = &library.instructions[id];
+      match lock.instructions.get_mut(id) {
         Some(record) => {
           record.name = instruction.name.clone();
           record.source = instruction.source.clone();
@@ -1313,24 +1363,13 @@ fn write_remote_items(
     Ok(())
   })?;
 
-  if keys.contains(AGENTS_KEY) {
-    let apps: Vec<AgentApp> = match contents.get(AGENTS_FILE) {
-      Some(content) => serde_json::from_slice(content)
-        .map_err(|e| format!("The repository's agents.json is not valid: {}", e))?,
-      None => Vec::new(),
-    };
-    let mut apps = apps;
-    apps.sort_by(|a, b| a.id.cmp(&b.id));
-    let normalized = agents_json(&apps)?;
-    if agents_json(&read_user_agent_apps(env)?)? != normalized {
-      write_atomic(&user_agent_apps_path(env), &normalized)?;
+  let mut agents_changed = false;
+  if let Some(normalized) = &prepared.agents {
+    if &agents_json(&read_user_agent_apps(env)?)? != normalized {
+      write_atomic(&user_agent_apps_path(env), normalized)?;
       agents_changed = true;
     }
   }
-
   let _ = remove_path_any(&staging);
-  Ok(Written {
-    agents_changed,
-    errors,
-  })
+  Ok(agents_changed)
 }

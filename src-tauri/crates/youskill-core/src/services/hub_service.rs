@@ -589,9 +589,10 @@ pub fn accept_hub(env: &Env, key: &str) -> Result<ActionResult, String> {
 }
 
 /// Remove a skill from the hub. With `remove_installs = false`, symlink targets are turned
-/// into real copies first so agents keep working.
+/// into real copies first so agents keep working. Runs inside a caller's operation (a
+/// library restore) without taking the lock again.
 pub fn remove_hub_skill(env: &Env, key: &str, remove_installs: bool) -> Result<(), String> {
-  let _ops = ops_guard(env)?;
+  let _ops = ops_guard_unless_held(&env.youskill_root)?;
   let (id, record) = resolve_skill(env, key)?;
   let store = store(env);
   let hub_dir = env.hub_dir(&id, &record.name);

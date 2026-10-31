@@ -446,6 +446,27 @@ impl ItemVersion {
     self.files == other.files && self.shared_entry() == other.shared_entry()
   }
 
+  /// Equal files, name and source: two versions that only differ in hash and timestamps,
+  /// as two computers that made the same edit produce.
+  fn same_except_times(&self, other: &ItemVersion) -> bool {
+    let strip = |entry: Entry| match entry {
+      Entry::Skill(skill) => Entry::Skill(LibrarySkill {
+        hash: String::new(),
+        imported_at: String::new(),
+        updated_at: String::new(),
+        ..skill
+      }),
+      Entry::Instruction(instruction) => Entry::Instruction(LibraryInstruction {
+        hash: String::new(),
+        imported_at: String::new(),
+        updated_at: String::new(),
+        ..instruction
+      }),
+      Entry::Agents => Entry::Agents,
+    };
+    self.files == other.files && strip(self.shared_entry()) == strip(other.shared_entry())
+  }
+
   /// The source key that pairs items on a first merge: a GitHub or folder source.
   fn source_key(&self) -> Option<String> {
     match &self.entry {

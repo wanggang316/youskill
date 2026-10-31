@@ -419,7 +419,6 @@ fn backup_then_restore_on_an_empty_computer() {
   let pulled = pull(&b, &repo);
   assert_eq!(pulled.result, RestoreResult::Applied);
   assert!(!pulled.pushed);
-  assert!(pulled.errors.is_empty(), "{:?}", pulled.errors);
   assert!(pulled.agents_changed);
   assert_eq!(hub_hash(&a, FOO, "foo"), hub_hash(&b, FOO, "foo"));
   assert_eq!(
@@ -521,7 +520,6 @@ fn pull_brings_changes_from_another_computer() {
     },
   );
   assert_eq!(pulled.result, RestoreResult::Applied);
-  assert!(pulled.errors.is_empty(), "{:?}", pulled.errors);
   assert!(!pulled.pushed);
   assert_eq!(hub_hash(&a, FOO, "foo"), hub_hash(&b, FOO, "foo"));
   assert!(!store(&b).read().unwrap().skills.contains_key(BAR));
@@ -787,7 +785,7 @@ fn conflict_matrix_for_skills() {
     .all(|item| item.key != skill_key(FOO) || item.resolution != Resolution::Conflict));
 
   // Take the repository side of both: BAR comes back, BAZ goes.
-  let outcome = apply(
+  apply(
     &b,
     &repo,
     &planned,
@@ -796,7 +794,6 @@ fn conflict_matrix_for_skills() {
       (&skill_key(BAZ), ConflictChoice::TakeRemote),
     ]),
   );
-  assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
   assert_eq!(hub_hash(&a, BAR, "bar"), hub_hash(&b, BAR, "bar"));
   assert!(!store(&b).read().unwrap().skills.contains_key(BAZ));
   assert!(status(&b).unwrap().changes.is_empty());
@@ -1029,13 +1026,12 @@ fn first_merge_pairs_equal_content_and_keeps_installs() {
     Resolution::KeepLocal
   );
 
-  let outcome = apply(
+  apply(
     &b,
     &repo,
     &planned,
     decide(&[(&skill_key(BAZ), ConflictChoice::TakeRemote)]),
   );
-  assert!(outcome.errors.is_empty(), "{:?}", outcome.errors);
   let lock = store(&b).read().unwrap();
   assert_eq!(
     lock.skills.keys().cloned().collect::<BTreeSet<_>>(),
@@ -1278,35 +1274,6 @@ fn undo_puts_back_the_library_before_the_restore() {
 }
 
 #[test]
-fn a_failed_restore_keeps_the_base_and_the_checkpoint() {
-  let tmp = tempfile::tempdir().unwrap();
-  let repo = FakeRepo::initialized();
-  let a = computer(tmp.path(), "a", &["claude-code"]);
-  add_skill(&a, FOO, "foo", "v1");
-  backup_with(&a, &repo).unwrap();
-
-  let b = computer(tmp.path(), "b", &["claude-code"]);
-  add_skill(&b, BAR, "foo", "v1");
-  add_skill(&b, BAZ, "baz", "v1");
-  let lock_before = fs::read(&b.lock_path).unwrap();
-  let planned = plan(&b, &repo, RestoreMode::Merge);
-  repo.fail_downloads();
-  let failed = apply_restore_with(
-    &b,
-    &repo,
-    &planned,
-    &RestoreDecisions::default(),
-    &RestoreOptions::default(),
-    InstallMode::Copy,
-  );
-  assert!(failed.is_err());
-  assert!(read_state(&b).unwrap().last_synced_commit.is_none());
-  assert!(status(&b).unwrap().checkpoint.is_some());
-  undo_restore(&b).unwrap();
-  assert_eq!(fs::read(&b.lock_path).unwrap(), lock_before);
-}
-
-#[test]
 fn restore_can_apply_the_installs() {
   let tmp = tempfile::tempdir().unwrap();
   let repo = FakeRepo::initialized();
@@ -1332,4 +1299,289 @@ fn restore_can_apply_the_installs() {
   assert_eq!(installs.applied, 1, "{:?}", installs.failures);
   assert!(b.home.join(".claude-code/skills/foo/SKILL.md").is_file());
   assert!(pending(&b).unwrap().is_empty());
+}
+
+#[test]
+fn a_failed_download_changes_nothing_and_keeps_the_last_checkpoint() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
+  edit_skill(&a, FOO, "foo", "v2");
+  backup_with(&a, &repo).unwrap();
+
+  let base = status_commit(&b);
+  let checkpoint = status(&b).unwrap().checkpoint;
+  assert!(checkpoint.is_some());
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  repo.fail_downloads();
+  let failed = apply_restore_with(
+    &b,
+    &repo,
+    &planned,
+    &RestoreDecisions::default(),
+    &RestoreOptions::default(),
+    InstallMode::Copy,
+  );
+  assert!(failed.is_err());
+  assert_eq!(status_commit(&b), base);
+  assert_eq!(status(&b).unwrap().checkpoint, checkpoint);
+  assert!(skill_body(&b, FOO, "foo").contains("v1"));
+}
+
+#[test]
+fn a_repository_item_without_files_stops_the_restore_before_any_write() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
+  edit_skill(&a, FOO, "foo", "v2");
+  add_skill(&a, BAR, "bar", "v1");
+  backup_with(&a, &repo).unwrap();
+  // A commit whose library lists BAR but holds none of its files.
+  let head = repo.head_commit();
+  let mut files = repo.files_at(&head, "");
+  files.retain(|path, _| !path.starts_with(&format!("skills/{}/", BAR)));
+  let tree = repo.create_tree(&files).unwrap();
+  let broken = repo.create_commit("broken", &tree, Some(&head)).unwrap();
+  repo.update_head(&broken).unwrap();
+
+  let base = status_commit(&b);
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  let failed = apply_restore_with(
+    &b,
+    &repo,
+    &planned,
+    &RestoreDecisions::default(),
+    &RestoreOptions::default(),
+    InstallMode::Copy,
+  );
+  assert!(failed.unwrap_err().contains("no files for bar"));
+  assert_eq!(status_commit(&b), base);
+  assert_eq!(repo.head_commit(), broken);
+  assert!(skill_body(&b, FOO, "foo").contains("v1"));
+}
+
+#[cfg(unix)]
+#[test]
+fn a_failed_removal_keeps_the_base_and_can_be_undone() {
+  use std::os::unix::fs::PermissionsExt;
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
+  install_as(&b, FOO, &["claude-code"], InstallMode::Symlink);
+  hub_service::remove_hub_skill(&a, FOO, false).unwrap();
+  backup_with(&a, &repo).unwrap();
+
+  let base = status_commit(&b);
+  let head = repo.head_commit();
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  // The symlink install cannot become a copy in a read-only directory.
+  let skills_dir = b.home.join(".claude-code/skills");
+  fs::set_permissions(&skills_dir, fs::Permissions::from_mode(0o555)).unwrap();
+  let failed = apply_restore_with(
+    &b,
+    &repo,
+    &planned,
+    &RestoreDecisions {
+      removals: BTreeMap::from([(skill_key(FOO), RemovalChoice::Remove)]),
+      ..Default::default()
+    },
+    &RestoreOptions::default(),
+    InstallMode::Copy,
+  );
+  fs::set_permissions(&skills_dir, fs::Permissions::from_mode(0o755)).unwrap();
+  assert!(failed.is_err());
+  assert_eq!(status_commit(&b), base);
+  assert_eq!(repo.head_commit(), head, "nothing was pushed");
+  assert_eq!(
+    status(&b).unwrap().checkpoint.map(|info| info.target),
+    Some(head)
+  );
+
+  undo_restore(&b).unwrap();
+  let lock = store(&b).read().unwrap();
+  assert!(lock.skills.contains_key(FOO));
+  assert!(skill_body(&b, FOO, "foo").contains("v1"));
+  assert_eq!(
+    fs::read_link(&lock.skills[FOO].installs[0].path).unwrap(),
+    b.hub_dir(FOO, "foo")
+  );
+}
+
+#[test]
+fn different_sources_for_the_same_files_conflict() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
+  set_source(&a, FOO, github_source("skills/foo"));
+  backup_with(&a, &repo).unwrap();
+  set_source(&b, FOO, github_source("skills/other"));
+
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  assert_eq!(
+    resolutions(&planned),
+    vec![(skill_key(FOO), Resolution::Conflict)]
+  );
+
+  // The same source on both sides is the same change.
+  set_source(&b, FOO, github_source("skills/foo"));
+  assert!(plan(&b, &repo, RestoreMode::Pull).items.is_empty());
+}
+
+const SHARED_B: &str = "00000000-0000-4000-8000-0000000000b1";
+
+/// A has `shared` (BAZ) from a GitHub folder; B imported the same folder as `local_name`
+/// with other content and a symlink install.
+fn first_merge_pair(root: &Path, repo: &FakeRepo, local_name: &str) -> Env {
+  let a = computer(root, "a", &["claude-code"]);
+  add_skill(&a, BAZ, "shared", "repo version");
+  set_source(&a, BAZ, github_source("skills/shared"));
+  backup_with(&a, repo).unwrap();
+  let b = computer(root, "b", &["claude-code"]);
+  add_skill(&b, SHARED_B, local_name, "local version");
+  set_source(&b, SHARED_B, github_source("skills/shared"));
+  install_as(&b, SHARED_B, &["claude-code"], InstallMode::Symlink);
+  b
+}
+
+#[test]
+fn keep_both_on_a_first_merge_pair_adds_a_suffixed_local_copy() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let b = first_merge_pair(tmp.path(), &repo, "shared");
+
+  let planned = plan(&b, &repo, RestoreMode::Merge);
+  assert_eq!(
+    item(&planned, &skill_key(BAZ)).match_reason,
+    Some(MatchReason::SourceKey)
+  );
+  let outcome = apply(
+    &b,
+    &repo,
+    &planned,
+    decide(&[(&skill_key(BAZ), ConflictChoice::KeepBoth)]),
+  );
+  assert!(outcome.pushed);
+  let lock = store(&b).read().unwrap();
+  assert_eq!(lock.skills.len(), 2);
+  assert!(!lock.skills.contains_key(SHARED_B));
+  assert!(skill_body(&b, BAZ, "shared").contains("repo version"));
+  let install = &lock.skills[BAZ].installs[0];
+  assert_eq!(
+    fs::read_link(&install.path).unwrap(),
+    b.hub_dir(BAZ, "shared")
+  );
+  let (copy_id, copy) = lock
+    .skills
+    .iter()
+    .find(|(id, _)| id.as_str() != BAZ)
+    .unwrap();
+  assert_eq!(copy.name, "shared-local");
+  assert_eq!(copy.source, SkillSource::None);
+  assert!(copy.installs.is_empty());
+  assert!(skill_body(&b, copy_id, "shared-local").contains("local version"));
+  let head = library_at_head(&repo);
+  assert_eq!(head.skills[copy_id.as_str()].name, "shared-local");
+  assert_eq!(head.skills[BAZ].name, "shared");
+  assert!(status(&b).unwrap().changes.is_empty());
+}
+
+#[test]
+fn symlink_installs_follow_a_rekey_and_a_rename() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let b = first_merge_pair(tmp.path(), &repo, "mine");
+
+  let planned = plan(&b, &repo, RestoreMode::Merge);
+  apply(
+    &b,
+    &repo,
+    &planned,
+    decide(&[(&skill_key(BAZ), ConflictChoice::TakeRemote)]),
+  );
+  let lock = store(&b).read().unwrap();
+  assert_eq!(lock.skills[BAZ].name, "shared");
+  let link = PathBuf::from(&lock.skills[BAZ].installs[0].path);
+  assert_eq!(fs::read_link(&link).unwrap(), b.hub_dir(BAZ, "shared"));
+  assert!(link.join("SKILL.md").is_file());
+}
+
+#[test]
+fn undo_takes_back_the_installs_of_the_restore() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  install(&a, FOO, &["claude-code"]);
+  backup_with(&a, &repo).unwrap();
+
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  let outcome = apply_restore_with(
+    &b,
+    &repo,
+    &planned,
+    &RestoreDecisions::default(),
+    &RestoreOptions {
+      apply_installs: true,
+    },
+    InstallMode::Copy,
+  )
+  .unwrap();
+  assert_eq!(outcome.installs.unwrap().applied, 1);
+  let target = b.home.join(".claude-code/skills/foo");
+  assert!(target.join("SKILL.md").is_file());
+
+  undo_restore(&b).unwrap();
+  assert!(!target.exists());
+  assert!(store(&b).read().unwrap().skills.is_empty());
+  assert!(status(&b).unwrap().checkpoint.is_none());
+}
+
+#[test]
+fn undo_refuses_to_discard_a_later_edit() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (_, b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
+  edit_skill(&b, FOO, "foo", "edited after the restore");
+
+  let err = undo_restore(&b).unwrap_err();
+  assert!(
+    err.contains(&b.hub_root.join(FOO).to_string_lossy().to_string()),
+    "{}",
+    err
+  );
+  assert!(skill_body(&b, FOO, "foo").contains("edited after the restore"));
+  assert!(status(&b).unwrap().checkpoint.is_some());
+}
+
+#[cfg(unix)]
+#[test]
+fn undo_keeps_the_checkpoint_until_every_link_is_back() {
+  use std::os::unix::fs::PermissionsExt;
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  backup_with(&a, &repo).unwrap();
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  add_skill(&b, BAR, "foo", "v1");
+  install_as(&b, BAR, &["claude-code"], InstallMode::Symlink);
+  let planned = plan(&b, &repo, RestoreMode::Merge);
+  apply(&b, &repo, &planned, RestoreDecisions::default());
+
+  let skills_dir = b.home.join(".claude-code/skills");
+  fs::set_permissions(&skills_dir, fs::Permissions::from_mode(0o555)).unwrap();
+  let failed = undo_restore(&b);
+  fs::set_permissions(&skills_dir, fs::Permissions::from_mode(0o755)).unwrap();
+  assert!(failed.is_err());
+  assert!(status(&b).unwrap().checkpoint.is_some());
+
+  undo_restore(&b).unwrap();
+  let lock = store(&b).read().unwrap();
+  assert!(lock.skills.contains_key(BAR));
+  assert_eq!(
+    fs::read_link(&lock.skills[BAR].installs[0].path).unwrap(),
+    b.hub_dir(BAR, "foo")
+  );
+  assert!(status(&b).unwrap().checkpoint.is_none());
 }
