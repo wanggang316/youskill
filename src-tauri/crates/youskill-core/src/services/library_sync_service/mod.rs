@@ -41,17 +41,25 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 mod checkpoint;
+mod devices;
 mod migrate;
 mod restore;
+mod scope;
 
 pub use crate::utils::git_remote::RemoteCommit;
 pub use checkpoint::{undo_restore, CheckpointInfo};
+pub use devices::{
+  copy_device_installs, copy_device_installs_with, devices, devices_with, remove_device,
+  remove_device_with, rename_device, take_over_device, take_over_device_with, DeviceInfo,
+  DeviceItem, DeviceItemChoice,
+};
 pub use migrate::{migrate, migrate_with};
 pub use restore::{
   apply_restore, apply_restore_with, history, history_with, plan_restore, plan_restore_with,
   ConflictChoice, ItemChange, MatchReason, PlanState, RemovalChoice, Resolution, RestoreDecisions,
   RestoreItem, RestoreMode, RestoreOptions, RestoreOutcome, RestorePlan, RestoreResult,
 };
+pub use scope::{copy_device_item, copy_device_item_with, item_scope, set_item_scope, ItemScope};
 
 /// Local sync state, next to the lock files. Never synced.
 pub const SYNC_STATE_FILE: &str = ".sync-state.json";
@@ -310,6 +318,10 @@ pub struct SyncState {
   /// deferred item, but offered selected by the next restore.
   #[serde(default)]
   pub incoming: BTreeMap<String, IncomingItem>,
+  /// Scope changes made on this computer since the base, by item key. The next backup
+  /// writes them, like any other local edit.
+  #[serde(default)]
+  pub scopes: BTreeMap<String, Scope>,
 }
 
 impl SyncState {
@@ -331,6 +343,7 @@ impl SyncState {
     self.base_local_agents.clear();
     self.deferred.clear();
     self.incoming.clear();
+    self.scopes.clear();
   }
 
   /// The device id, or an empty id (which owns no item) before the first sync.
@@ -621,6 +634,15 @@ impl ItemVersion {
     }
   }
 
+  fn scope(&self) -> Option<&Scope> {
+    match &self.entry {
+      Entry::Skill(skill) => Some(&skill.scope),
+      Entry::Instruction(instruction) => Some(&instruction.scope),
+      Entry::Agent(agent) => Some(&agent.scope),
+      Entry::Legacy => None,
+    }
+  }
+
   fn same_content(&self, other: &ItemVersion) -> bool {
     self == other
   }
@@ -780,6 +802,25 @@ fn item_versions(
   items
 }
 
+fn scope_in<'a>(
+  library: &'a LibraryFile,
+  agents: &'a [SyncedAgent],
+  key: &str,
+) -> Option<&'a Scope> {
+  match split_key(key)? {
+    (ItemKind::Skill, id) => library.skills.get(id).map(|skill| &skill.scope),
+    (ItemKind::Instruction, id) => library
+      .instructions
+      .get(id)
+      .map(|instruction| &instruction.scope),
+    (ItemKind::Agent, id) => agents
+      .iter()
+      .find(|agent| agent.app.id == id)
+      .map(|agent| &agent.scope),
+    (ItemKind::Device, _) => None,
+  }
+}
+
 /// One state of the repository: a commit, or the base kept in the sync state.
 #[derive(Debug, Clone, Default)]
 struct RepoState {
@@ -800,9 +841,27 @@ struct Foreign {
   files: BTreeMap<String, TreeFile>,
 }
 
+impl Foreign {
+  /// Item keys of the device-only items of other devices.
+  fn keys(&self) -> BTreeSet<String> {
+    self
+      .skills
+      .keys()
+      .map(|id| skill_key(id))
+      .chain(self.instructions.keys().map(|id| instruction_key(id)))
+      .chain(self.agents.iter().map(|agent| agent_key(&agent.app.id)))
+      .collect()
+  }
+}
+
 impl RepoState {
   fn items(&self, device: &str) -> BTreeMap<String, ItemVersion> {
     item_versions(&self.library, &self.agents, &self.files, device)
+  }
+
+  /// The scope of an item, whichever device gets it.
+  fn scope_of(&self, key: &str) -> Option<&Scope> {
+    scope_in(&self.library, &self.agents, key)
   }
 
   fn foreign(&self, device: &str) -> Foreign {
@@ -1235,11 +1294,15 @@ impl Snapshot {
   }
 }
 
-/// The scope of a local item: the scope the base gives it when this device gets it there,
-/// else shared (a new item is shared).
-fn local_scope(base: Option<&Scope>, device: &str) -> Scope {
-  base
-    .filter(|scope| device_gets(scope, device))
+/// The scope of a local item: a scope change made here, else the scope the base gives it
+/// when this device gets it there, else shared (a new item is shared).
+fn local_scope(state: &SyncState, key: &str, base: Option<&Scope>, device: &str) -> Scope {
+  let gets = |scope: &&Scope| device_gets(scope, device);
+  state
+    .scopes
+    .get(key)
+    .filter(gets)
+    .or(base.filter(gets))
     .cloned()
     .unwrap_or_default()
 }
@@ -1291,6 +1354,8 @@ fn local_snapshot(env: &Env, state: &SyncState, device: &str) -> Result<Snapshot
         imported_at: record.imported_at.clone(),
         updated_at: record.updated_at.clone(),
         scope: local_scope(
+          state,
+          &skill_key(id),
           base
             .and_then(|library| library.skills.get(id))
             .map(|skill| &skill.scope),
@@ -1328,6 +1393,8 @@ fn local_snapshot(env: &Env, state: &SyncState, device: &str) -> Result<Snapshot
         imported_at: record.imported_at.clone(),
         updated_at: record.updated_at.clone(),
         scope: local_scope(
+          state,
+          &instruction_key(id),
           base
             .and_then(|library| library.instructions.get(id))
             .map(|instruction| &instruction.scope),
@@ -1346,6 +1413,8 @@ fn local_snapshot(env: &Env, state: &SyncState, device: &str) -> Result<Snapshot
     .into_iter()
     .map(|app| {
       let scope = local_scope(
+        state,
+        &agent_key(&app.id),
         base_agents
           .iter()
           .find(|agent| agent.app.id == app.id)
@@ -1783,6 +1852,15 @@ fn set_base(state: &mut SyncState, commit: String, composed: Composed, snapshot:
   state.base_agents = Some(composed.agents);
   state.base_device = Some(composed.device);
   state.base_local_agents = snapshot.local_agents.clone();
+  // A scope change is done once the base has it; one the base does not have (the item
+  // carried from the repository) waits for a later backup.
+  let (library, agents) = (
+    state.base_library.clone().unwrap_or_default(),
+    state.base_agents.clone().unwrap_or_default(),
+  );
+  state
+    .scopes
+    .retain(|key, scope| scope_in(&library, &agents, key).is_some_and(|base| base != scope));
 }
 
 /// Back up this device's items and device file. When another device moved the branch

@@ -99,6 +99,10 @@ pub struct RestoreItem {
   /// unless included again.
   #[serde(default)]
   pub deferred: bool,
+  /// Another device made this shared item its device-only item: removed by default. A
+  /// kept local version becomes a device-only item of this device with a new id.
+  #[serde(default)]
+  pub made_device_only: bool,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq)]
@@ -158,7 +162,7 @@ pub struct RestoreDecisions {
   /// Required for every conflict.
   #[serde(default)]
   pub conflicts: BTreeMap<String, ConflictChoice>,
-  /// Default `keep`.
+  /// Default `keep`, except `remove` for an item another device made device-only.
   #[serde(default)]
   pub removals: BTreeMap<String, RemovalChoice>,
   /// Include (`true`) or exclude a `take_remote` item. Default: include, except a deferred
@@ -262,6 +266,7 @@ pub fn plan_restore_with(
 /// A plan with what applying it needs.
 struct Planned {
   plan: RestorePlan,
+  device: String,
   head: Option<RemoteHead>,
   /// The head commit, for the parts of other devices.
   head_state: RepoState,
@@ -409,6 +414,7 @@ fn compute_plan(
       fingerprint: fingerprint(state, &snapshot)?,
       items: Vec::new(),
     },
+    device: device.clone(),
     head: head.clone(),
     head_state: RepoState::default(),
     target_state: RepoState::default(),
@@ -522,6 +528,10 @@ fn compute_plan(
       deferred: incoming.is_none()
         && deferred_version
           .is_some_and(|version| r.is_some_and(|remote| remote.same_content(version))),
+      made_device_only: r.is_none()
+        && target_state
+          .scope_of(key)
+          .is_some_and(|scope| !device_gets(scope, &device)),
     });
   }
   items.sort_by(|a, b| {
@@ -560,6 +570,9 @@ struct Actions {
   removals: Vec<String>,
   /// Repository versions the user left out.
   deferred: BTreeMap<String, ItemVersion>,
+  /// (key, new id): a local item whose id is a device-only item of another device at the
+  /// head moves to a new id as a device-only item of this device.
+  reids: Vec<(String, String)>,
 }
 
 impl Actions {
@@ -589,7 +602,12 @@ impl Actions {
           }
         },
         Resolution::RemovalCandidate => {
-          if decisions.removals.get(key) == Some(&RemovalChoice::Remove) {
+          let default = if item.made_device_only {
+            RemovalChoice::Remove
+          } else {
+            RemovalChoice::Keep
+          };
+          if decisions.removals.get(key).copied().unwrap_or(default) == RemovalChoice::Remove {
             actions.removals.push(key.clone());
           }
         },
@@ -630,18 +648,47 @@ impl Actions {
               // the same: the id and its installs get the repository version, the local
               // version becomes a new item.
               rekey(&mut actions);
-              let new_id = match item.kind {
-                ItemKind::Skill => new_skill_id(),
-                _ => uuid::Uuid::new_v4().to_string(),
-              };
-              actions.copies.push((key.clone(), new_id));
+              actions
+                .copies
+                .push((key.clone(), new_item_id(item.kind, &item.id)));
               actions.writes.insert(key.clone());
             },
           }
         },
       }
     }
+    // What stays here after the restore must not take the id of an item of another device.
+    let foreign = planned.head_state.foreign(&planned.device).keys();
+    let removed: BTreeSet<&String> = actions.removals.iter().collect();
+    let staying: BTreeSet<&String> = planned
+      .local
+      .keys()
+      .chain(actions.writes.iter())
+      .filter(|key| !removed.contains(key) && foreign.contains(*key))
+      .collect();
+    for key in staying {
+      if let Some((kind, id)) = split_key(key) {
+        actions.reids.push((key.clone(), new_item_id(kind, id)));
+      }
+    }
     Ok(actions)
+  }
+}
+
+/// A new id for a local copy of the item `id`.
+fn new_item_id(kind: ItemKind, id: &str) -> String {
+  match kind {
+    ItemKind::Skill => new_skill_id(),
+    ItemKind::Agent => super::scope::new_agent_id(id),
+    _ => uuid::Uuid::new_v4().to_string(),
+  }
+}
+
+fn key_of(kind: ItemKind, id: &str) -> String {
+  match kind {
+    ItemKind::Skill => skill_key(id),
+    ItemKind::Instruction => instruction_key(id),
+    _ => agent_key(id),
   }
 }
 
@@ -741,6 +788,22 @@ pub fn apply_restore_with(
       errors.join("\n")
     ));
   }
+  let mut reided = Vec::new();
+  for (key, new_id) in &actions.reids {
+    let Some((kind, id)) = split_key(key) else {
+      continue;
+    };
+    let new_key = key_of(kind, new_id);
+    match kind {
+      ItemKind::Agent => super::scope::reid_agent(env, id, new_id)?,
+      _ => {
+        rekey(env, key, &new_key)?;
+        // The item of the other device keeps the source key.
+        super::scope::detach_source(env, &new_key)?;
+      },
+    }
+    reided.push((key.clone(), new_key));
+  }
 
   // The base becomes the target. Its device file for this device is the base of the
   // installs here, so the pending list shows what it changes. A target without that file
@@ -758,10 +821,17 @@ pub fn apply_restore_with(
   next.base_agents = Some(planned.target_state.agents.clone());
   next.deferred = actions.deferred.clone();
   next.incoming.clear();
+  for (key, new_key) in &reided {
+    next.scopes.remove(key);
+    next
+      .scopes
+      .insert(new_key.clone(), Scope::Device(planned.device.clone()));
+  }
   write_state(env, &next)?;
 
   let mut outcome = commit_result(env, remote, &planned, &head, &target_commit)?;
-  outcome.agents_changed = agents_changed;
+  outcome.agents_changed =
+    agents_changed || reided.iter().any(|(key, _)| key.starts_with("agent:"));
   checkpoint::seal(env)?;
   if options.apply_installs && outcome.result == RestoreResult::Applied {
     let items: Vec<PendingItem> = pending(env)?
@@ -889,12 +959,11 @@ fn checkpoint_scope(env: &Env, actions: &Actions) -> Result<(Vec<PathBuf>, Vec<L
     keys.push(local_key.clone());
     keys.push(remote_key.clone());
   }
-  for (key, new_id) in &actions.copies {
+  for (key, new_id) in actions.copies.iter().chain(actions.reids.iter()) {
     keys.push(key.clone());
-    keys.push(match split_key(key) {
-      Some((ItemKind::Skill, _)) => skill_key(new_id),
-      _ => instruction_key(new_id),
-    });
+    if let Some((kind, _)) = split_key(key) {
+      keys.push(key_of(kind, new_id));
+    }
   }
   keys.extend(actions.writes.iter().cloned());
   keys.extend(actions.removals.iter().cloned());
@@ -1142,7 +1211,7 @@ pub(super) fn safe_components(path: &str) -> Option<Vec<&str>> {
   safe.then_some(parts)
 }
 
-fn write_entry(path: &Path, mode: &str, content: &[u8]) -> Result<(), String> {
+pub(super) fn write_entry(path: &Path, mode: &str, content: &[u8]) -> Result<(), String> {
   if let Some(parent) = path.parent() {
     fs::create_dir_all(parent).map_err(|e| e.to_string())?;
   }

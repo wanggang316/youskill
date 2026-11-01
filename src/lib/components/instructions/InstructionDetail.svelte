@@ -7,6 +7,7 @@
   import SegmentedTabs from "$lib/components/ui/SegmentedTabs.svelte";
   import MarkdownEditor from "$lib/components/MarkdownEditor.svelte";
   import InstallTargets from "$lib/components/library/InstallTargets.svelte";
+  import ItemScopeField from "$lib/components/library/ItemScopeField.svelte";
   import DriftPanel, { type TargetAction } from "$lib/components/library/DriftPanel.svelte";
   import { t } from "$lib/i18n";
   import {
@@ -268,6 +269,7 @@
           <dd>{formatDate(instruction.importedAt)}</dd>
           <dt>{$t("detail.updatedAt")}</dt>
           <dd>{formatDate(instruction.updatedAt)}</dd>
+          <ItemScopeField itemKey={`instruction:${instruction.id}`} />
         </dl>
 
         {#if renameError}

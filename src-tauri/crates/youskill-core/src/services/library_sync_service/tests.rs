@@ -2372,6 +2372,530 @@ fn a_restore_before_this_device_joined_keeps_its_installs() {
   );
 }
 
+// ---------------------------------------------------------------------------
+// Item scope changes
+// ---------------------------------------------------------------------------
+
+fn make_device_only(env: &Env, key: &str) {
+  set_item_scope(env, key, ItemScope::Device).unwrap();
+}
+
+/// Skills by name in the lock of `env`, as (id, name).
+fn skills_named(env: &Env, name: &str) -> Vec<String> {
+  store(env)
+    .read()
+    .unwrap()
+    .skills
+    .iter()
+    .filter(|(_, record)| record.name == name)
+    .map(|(id, _)| id.clone())
+    .collect()
+}
+
+fn device_scope(env: &Env) -> Scope {
+  Scope::Device(device_id(env))
+}
+
+#[test]
+fn a_shared_item_made_device_only_leaves_the_other_devices() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    add_skill(a, BAR, "bar", "v1");
+  });
+
+  make_device_only(&a, &skill_key(FOO));
+  assert_eq!(
+    item_scope(&a, &skill_key(FOO)).unwrap(),
+    Some(ItemScope::Device)
+  );
+  assert_eq!(
+    status(&a).unwrap().changes,
+    vec![LibraryChange {
+      kind: ItemKind::Skill,
+      id: FOO.to_string(),
+      name: "foo".to_string(),
+      change: ChangeKind::Modified,
+    }]
+  );
+  assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
+  assert_eq!(library_at_head(&repo).skills[FOO].scope, device_scope(&a));
+  assert!(read_state(&a).unwrap().scopes.is_empty());
+  assert!(status(&a).unwrap().changes.is_empty());
+
+  // B cannot change the item of A, and its restore removes it by default.
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  let removal = item(&planned, &skill_key(FOO));
+  assert_eq!(removal.resolution, Resolution::RemovalCandidate);
+  assert!(removal.made_device_only);
+  apply(&b, &repo, &planned, RestoreDecisions::default());
+  assert!(skills_named(&b, "foo").is_empty());
+  assert!(item_scope(&b, &skill_key(FOO)).unwrap().is_none());
+  assert!(set_item_scope(&b, &skill_key(FOO), ItemScope::Shared).is_err());
+  assert_eq!(library_at_head(&repo).skills[FOO].scope, device_scope(&a));
+  assert!(plan(&a, &repo, RestoreMode::Pull).items.is_empty());
+}
+
+#[test]
+fn a_kept_or_changed_copy_becomes_a_device_only_item_with_a_new_id() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    add_skill(a, BAR, "bar", "v1");
+  });
+  install(&b, FOO, &["claude-code"]);
+  backup_with(&b, &repo).unwrap();
+  pull(&a, &repo);
+  make_device_only(&a, &skill_key(FOO));
+  make_device_only(&a, &skill_key(BAR));
+  backup_with(&a, &repo).unwrap();
+  edit_skill(&b, BAR, "bar", "v2 on b");
+
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  assert_eq!(
+    item(&planned, &skill_key(FOO)).resolution,
+    Resolution::RemovalCandidate
+  );
+  assert_eq!(
+    item(&planned, &skill_key(BAR)).resolution,
+    Resolution::Conflict
+  );
+  let mut decisions = decide(&[(&skill_key(BAR), ConflictChoice::KeepLocal)]);
+  decisions
+    .removals
+    .insert(skill_key(FOO), RemovalChoice::Keep);
+  let outcome = apply(&b, &repo, &planned, decisions);
+  assert!(outcome.pushed);
+
+  let foo = skills_named(&b, "foo");
+  let bar = skills_named(&b, "bar");
+  assert_eq!(foo.len(), 1);
+  assert_eq!(bar.len(), 1);
+  assert!(foo[0] != FOO && bar[0] != BAR);
+  assert!(skill_body(&b, &bar[0], "bar").contains("v2 on b"));
+  // The installs follow the kept item.
+  assert_eq!(
+    device_file(&repo, &b).by_item(),
+    BTreeMap::from([(skill_key(&foo[0]), vec!["claude-code".to_string()])])
+  );
+  let library = library_at_head(&repo);
+  for id in [&foo[0], &bar[0]] {
+    assert_eq!(library.skills[id].scope, device_scope(&b));
+  }
+  for id in [FOO, BAR] {
+    assert_eq!(library.skills[id].scope, device_scope(&a));
+  }
+  assert!(status(&b).unwrap().changes.is_empty());
+  assert!(pending(&b).unwrap().is_empty());
+  // A gets none of the items of B.
+  assert!(plan(&a, &repo, RestoreMode::Pull).items.is_empty());
+  assert_eq!(store(&a).read().unwrap().skills.len(), 2);
+}
+
+#[test]
+fn the_owner_makes_its_item_shared_again_or_removes_it() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    add_skill(a, BAR, "bar", "v1");
+  });
+  make_device_only(&a, &skill_key(FOO));
+  make_device_only(&a, &skill_key(BAR));
+  backup_with(&a, &repo).unwrap();
+  pull(&b, &repo);
+  assert!(store(&b).read().unwrap().skills.is_empty());
+
+  set_item_scope(&a, &skill_key(FOO), ItemScope::Shared).unwrap();
+  hub_service::remove_hub_skill(&a, BAR, false).unwrap();
+  assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
+  let library = library_at_head(&repo);
+  assert_eq!(library.skills[FOO].scope, Scope::Shared);
+  assert!(!library.skills.contains_key(BAR));
+  assert!(repo
+    .files_at(&repo.head_commit(), &format!("skills/{}/", BAR))
+    .is_empty());
+
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  assert_eq!(
+    resolutions(&planned),
+    vec![(skill_key(FOO), Resolution::TakeRemote)]
+  );
+  assert_eq!(
+    item(&planned, &skill_key(FOO)).remote_change,
+    ItemChange::Added
+  );
+  apply(&b, &repo, &planned, RestoreDecisions::default());
+  assert_eq!(hub_hash(&a, FOO, "foo"), hub_hash(&b, FOO, "foo"));
+}
+
+#[test]
+fn a_scope_change_back_to_the_base_is_no_change() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, _b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
+  make_device_only(&a, &skill_key(FOO));
+  set_item_scope(&a, &skill_key(FOO), ItemScope::Shared).unwrap();
+  assert!(read_state(&a).unwrap().scopes.is_empty());
+  assert!(status(&a).unwrap().changes.is_empty());
+  assert!(set_item_scope(&a, &skill_key(BAR), ItemScope::Device).is_err());
+}
+
+#[test]
+fn backup_on_a_moved_head_keeps_the_scope_change_of_another_device() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    add_skill(a, BAR, "bar", "v1");
+  });
+  add_other_device(&repo);
+  pull(&a, &repo);
+  make_device_only(&a, &skill_key(FOO));
+  backup_with(&a, &repo).unwrap();
+
+  edit_skill(&b, BAR, "bar", "v2");
+  let backup = backup_with(&b, &repo).unwrap();
+  assert_eq!(backup.result, BackupResult::Pushed);
+  assert_eq!(backup.incoming, 1);
+  assert_eq!(library_at_head(&repo).skills[FOO].scope, device_scope(&a));
+  assert_other_device_kept(&repo);
+  assert!(skill_body(&a, FOO, "foo").contains("v1"));
+
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  assert!(item(&planned, &skill_key(FOO)).made_device_only);
+  apply(&b, &repo, &planned, RestoreDecisions::default());
+  assert!(skills_named(&b, "foo").is_empty());
+  assert_eq!(library_at_head(&repo).skills[FOO].scope, device_scope(&a));
+  assert_other_device_kept(&repo);
+}
+
+#[test]
+fn custom_agents_change_scope_like_skills() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    write_custom_agents(
+      a,
+      &[custom_agent("agent-a", "A"), custom_agent("agent-b", "B")],
+    );
+  });
+  make_device_only(&a, &agent_key("agent-a"));
+  make_device_only(&a, &agent_key("agent-b"));
+  backup_with(&a, &repo).unwrap();
+
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  assert!(item(&planned, &agent_key("agent-a")).made_device_only);
+  let mut decisions = RestoreDecisions::default();
+  decisions
+    .removals
+    .insert(agent_key("agent-b"), RemovalChoice::Keep);
+  let outcome = apply(&b, &repo, &planned, decisions);
+  assert!(outcome.agents_changed);
+  let apps = read_user_agent_apps(&b).unwrap();
+  assert_eq!(apps.len(), 1);
+  assert!(apps[0].id.starts_with("agent-b-"));
+  let agents = agents_at_head(&repo);
+  let scope_of = |id: &str| {
+    agents
+      .iter()
+      .find(|agent| agent.app.id == id)
+      .unwrap()
+      .scope
+      .clone()
+  };
+  assert_eq!(scope_of("agent-a"), device_scope(&a));
+  assert_eq!(scope_of("agent-b"), device_scope(&a));
+  assert_eq!(scope_of(&apps[0].id), device_scope(&b));
+  assert!(status(&b).unwrap().changes.is_empty());
+}
+
+#[test]
+fn a_copy_of_another_devices_item_gets_a_new_id_and_this_owner() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  backup_with(&a, &repo).unwrap();
+  add_other_device(&repo);
+  pull(&a, &repo);
+
+  assert!(set_item_scope(&a, &skill_key(OTHER_SKILL), ItemScope::Device).is_err());
+  assert!(copy_device_item_with(&a, &repo, &skill_key(FOO)).is_err());
+  let skill = copy_device_item_with(&a, &repo, &skill_key(OTHER_SKILL)).unwrap();
+  let agent = copy_device_item_with(&a, &repo, &agent_key("their-agent")).unwrap();
+  let (_, skill_id) = split_key(&skill).unwrap();
+  let (_, agent_id) = split_key(&agent).unwrap();
+  assert!(skill_id != OTHER_SKILL && agent_id != "their-agent");
+  assert_eq!(skill_body(&a, skill_id, "theirs"), "theirs");
+  assert_eq!(item_scope(&a, &skill).unwrap(), Some(ItemScope::Device));
+  assert_eq!(item_scope(&a, &agent).unwrap(), Some(ItemScope::Device));
+
+  assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
+  let library = library_at_head(&repo);
+  assert_eq!(library.skills[skill_id].scope, device_scope(&a));
+  assert!(agents_at_head(&repo)
+    .iter()
+    .any(|synced| synced.app.id == agent_id && synced.scope == device_scope(&a)));
+  assert_other_device_kept(&repo);
+  assert!(status(&a).unwrap().changes.is_empty());
+}
+
+// ---------------------------------------------------------------------------
+// Devices
+// ---------------------------------------------------------------------------
+
+#[test]
+fn devices_list_this_computer_first_with_their_items() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  install(&a, FOO, &["claude-code"]);
+  backup_with(&a, &repo).unwrap();
+  add_other_device(&repo);
+
+  let list = devices_with(&a, &repo).unwrap();
+  assert_eq!(list.len(), 2);
+  assert!(list[0].this_device && list[0].has_file);
+  assert_eq!(list[0].name, "a");
+  assert_eq!(list[0].install_count, 1);
+  assert!(list[0].last_backup_at.is_some());
+  assert!(list[0].items.is_empty());
+  assert_eq!(list[1].id, OTHER_DEVICE);
+  assert_eq!(list[1].name, "other");
+  assert_eq!(
+    list[1]
+      .items
+      .iter()
+      .map(|item| item.key.clone())
+      .collect::<Vec<_>>(),
+    vec![skill_key(OTHER_SKILL), agent_key("their-agent")]
+  );
+}
+
+#[test]
+fn a_renamed_device_writes_its_name_on_the_next_backup() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  backup_with(&a, &repo).unwrap();
+  assert!(rename_device(&a, "  ").is_err());
+  let renamed = rename_device(&a, "Studio").unwrap();
+  assert_eq!(renamed.device_name.as_deref(), Some("Studio"));
+  assert_eq!(renamed.changes.len(), 1);
+  assert_eq!(renamed.changes[0].kind, ItemKind::Device);
+  backup_with(&a, &repo).unwrap();
+  assert_eq!(device_file(&repo, &a).name, "Studio");
+}
+
+#[test]
+fn take_over_gets_the_id_installs_and_items_of_the_old_device() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  add_skill(&a, BAR, "bar", "v1");
+  install(&a, FOO, &["claude-code"]);
+  install(&a, BAR, &["claude-code"]);
+  make_device_only(&a, &skill_key(BAR));
+  backup_with(&a, &repo).unwrap();
+  let old = device_id(&a);
+
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  take_over_device_with(&b, &repo, &old).unwrap();
+  assert_eq!(device_id(&b), old);
+  assert_eq!(read_state(&b).unwrap().device_name.as_deref(), Some("a"));
+  pull(&b, &repo);
+  assert!(store(&b).read().unwrap().skills.contains_key(BAR));
+  assert_eq!(
+    item_scope(&b, &skill_key(BAR)).unwrap(),
+    Some(ItemScope::Device)
+  );
+  let pending = pending(&b).unwrap();
+  assert_eq!(pending.len(), 2, "{:?}", pending);
+  assert!(pending
+    .iter()
+    .all(|item| item.action == PendingAction::Install));
+  assert_eq!(
+    device_file(&repo, &b).by_item().len(),
+    2,
+    "the device file keeps its installs"
+  );
+
+  // Only on the first connect.
+  let c = computer(tmp.path(), "c", &["claude-code"]);
+  pull(&c, &repo);
+  assert!(take_over_device_with(&c, &repo, &old).is_err());
+  assert!(copy_device_installs_with(&c, &repo, None).is_err());
+}
+
+#[test]
+fn copy_installs_takes_the_agents_of_this_computer_only() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code", "codex"]);
+  add_skill(&a, FOO, "foo", "v1");
+  install(&a, FOO, &["claude-code", "codex"]);
+  backup_with(&a, &repo).unwrap();
+  let source = repo.head_file(&device_path(&device_id(&a))).unwrap();
+
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  copy_device_installs_with(&b, &repo, None).unwrap();
+  pull(&b, &repo);
+  let pending = pending(&b).unwrap();
+  assert_eq!(
+    pending
+      .iter()
+      .map(|item| (item.action, item.agent_id.as_str()))
+      .collect::<Vec<_>>(),
+    vec![(PendingAction::Install, "claude-code")]
+  );
+  assert_eq!(
+    device_file(&repo, &b).by_item(),
+    BTreeMap::from([(skill_key(FOO), vec!["claude-code".to_string()])])
+  );
+  assert_eq!(
+    repo.head_file(&device_path(&device_id(&a))).unwrap(),
+    source
+  );
+  assert!(copy_device_installs_with(&b, &repo, Some(&device_id(&a))).is_err());
+}
+
+fn three_devices(root: &Path, repo: &FakeRepo) -> (Env, Env, Env) {
+  let a = computer(root, "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  add_skill(&a, BAR, "bar", "v1");
+  add_skill(&a, BAZ, "baz", "v1");
+  write_custom_agents(&a, &[custom_agent("agent-a", "A")]);
+  for key in [
+    skill_key(FOO),
+    skill_key(BAR),
+    skill_key(BAZ),
+    agent_key("agent-a"),
+  ] {
+    make_device_only(&a, &key);
+  }
+  backup_with(&a, repo).unwrap();
+  let b = computer(root, "b", &["claude-code"]);
+  pull(&b, repo);
+  let c = computer(root, "c", &["claude-code"]);
+  pull(&c, repo);
+  (a, b, c)
+}
+
+#[test]
+fn removing_a_device_shares_gives_or_deletes_each_of_its_items() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b, c) = three_devices(tmp.path(), &repo);
+  let c_file = repo.head_file(&device_path(&device_id(&c))).unwrap();
+  let commits = repo.commit_count();
+
+  let mut choices = BTreeMap::from([
+    (skill_key(FOO), DeviceItemChoice::Share),
+    (
+      skill_key(BAR),
+      DeviceItemChoice::Give {
+        device: device_id(&c),
+      },
+    ),
+    (skill_key(BAZ), DeviceItemChoice::Delete),
+  ]);
+  // Every item needs a choice; a receiver must be another device of the repository.
+  assert!(remove_device_with(&b, &repo, &device_id(&a), &choices).is_err());
+  choices.insert(
+    agent_key("agent-a"),
+    DeviceItemChoice::Give {
+      device: device_id(&a),
+    },
+  );
+  assert!(remove_device_with(&b, &repo, &device_id(&a), &choices).is_err());
+  assert!(remove_device_with(&b, &repo, &device_id(&b), &BTreeMap::new()).is_err());
+  choices.insert(
+    agent_key("agent-a"),
+    DeviceItemChoice::Give {
+      device: device_id(&b),
+    },
+  );
+  remove_device_with(&b, &repo, &device_id(&a), &choices).unwrap();
+  assert_eq!(repo.commit_count(), commits + 1);
+
+  let library = library_at_head(&repo);
+  assert_eq!(library.skills[FOO].scope, Scope::Shared);
+  assert_eq!(library.skills[BAR].scope, device_scope(&c));
+  assert!(!library.skills.contains_key(BAZ));
+  assert!(repo
+    .files_at(&repo.head_commit(), &format!("skills/{}/", BAZ))
+    .is_empty());
+  assert_eq!(agents_at_head(&repo)[0].scope, device_scope(&b));
+  assert!(repo.head_file(&device_path(&device_id(&a))).is_none());
+  assert_eq!(
+    repo.head_file(&device_path(&device_id(&c))).unwrap(),
+    c_file
+  );
+
+  // The other devices get their items with the next restore.
+  pull(&b, &repo);
+  assert!(store(&b).read().unwrap().skills.contains_key(FOO));
+  assert!(!store(&b).read().unwrap().skills.contains_key(BAR));
+  assert_eq!(read_user_agent_apps(&b).unwrap()[0].id, "agent-a");
+  pull(&c, &repo);
+  let skills = store(&c).read().unwrap().skills;
+  assert!(skills.contains_key(FOO) && skills.contains_key(BAR) && !skills.contains_key(BAZ));
+  assert_eq!(devices_with(&c, &repo).unwrap().len(), 2);
+}
+
+/// Source keys of the hub skills of `env`, one per skill that has one.
+fn source_keys(env: &Env) -> Vec<String> {
+  store(env)
+    .read()
+    .unwrap()
+    .skills
+    .values()
+    .filter(|record| !matches!(record.source, SkillSource::None))
+    .map(|record| record.source.key())
+    .collect()
+}
+
+#[test]
+fn copies_of_another_devices_item_lose_its_source() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    set_source(a, FOO, github_source("skills/foo"));
+  });
+  make_device_only(&a, &skill_key(FOO));
+  backup_with(&a, &repo).unwrap();
+
+  // B keeps its copy; C copies the item of A.
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  let mut decisions = RestoreDecisions::default();
+  decisions
+    .removals
+    .insert(skill_key(FOO), RemovalChoice::Keep);
+  apply(&b, &repo, &planned, decisions);
+  let c = computer(tmp.path(), "c", &["claude-code"]);
+  pull(&c, &repo);
+  copy_device_item_with(&c, &repo, &skill_key(FOO)).unwrap();
+  backup_with(&c, &repo).unwrap();
+  pull(&b, &repo);
+
+  // A shares the item again: each device has it once with its source.
+  set_item_scope(&a, &skill_key(FOO), ItemScope::Shared).unwrap();
+  backup_with(&a, &repo).unwrap();
+  for env in [&b, &c] {
+    pull(env, &repo);
+    assert_eq!(skills_named(env, "foo").len(), 2);
+    assert_eq!(source_keys(env), source_keys(&a));
+  }
+}
+
 fn set_instruction_source(env: &Env, id: &str, source: InstructionSource) {
   instruction_service::update_lock(env, |lock| {
     lock.instructions.get_mut(id).unwrap().source = source;

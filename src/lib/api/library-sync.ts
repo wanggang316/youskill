@@ -88,6 +88,8 @@ export interface RestoreItem {
   matchReason?: MatchReason;
   /** Left out of an earlier restore; excluded unless included again. */
   deferred: boolean;
+  /** Another device made this item its device-only item: removed by default. */
+  madeDeviceOnly: boolean;
 }
 
 export interface RestorePlan {
@@ -204,4 +206,73 @@ export async function listLibraryPending(): Promise<PendingItem[]> {
 
 export async function applyLibraryPending(items: PendingItem[]): Promise<ApplyPendingOutcome> {
   return apiCall<ApplyPendingOutcome>("library_sync_apply_pending", { items });
+}
+
+/** `shared`: every device gets the item. `device`: only this device gets it. */
+export type ItemScope = "shared" | "device";
+
+export interface DeviceItem {
+  /** `skill:<id>`, `instruction:<id>` or `agent:<id>`. */
+  key: string;
+  kind: SyncItemKind;
+  id: string;
+  name: string;
+}
+
+export interface DeviceInfo {
+  id: string;
+  name: string;
+  lastBackupAt?: string;
+  installCount: number;
+  thisDevice: boolean;
+  /** The repository has a device file for it. */
+  hasFile: boolean;
+  /** Its device-only items. */
+  items: DeviceItem[];
+}
+
+/** What happens to a device-only item of a removed device. */
+export type DeviceItemChoice =
+  | { action: "share" }
+  | { action: "give"; device: string }
+  | { action: "delete" };
+
+/** The scope of a library item; `null` when the library is not connected. */
+export async function getItemScope(key: string): Promise<ItemScope | null> {
+  return apiCall<ItemScope | null>("library_sync_item_scope", { key });
+}
+
+/** A local edit: the next backup writes it. */
+export async function setItemScope(key: string, scope: ItemScope): Promise<void> {
+  return apiCall<void>("library_sync_set_item_scope", { key, scope });
+}
+
+/** Copy a device-only item of another device as this device's item. Returns the copy's key. */
+export async function copyDeviceItem(key: string): Promise<string> {
+  return apiCall<string>("library_sync_copy_device_item", { key });
+}
+
+export async function listSyncDevices(): Promise<DeviceInfo[]> {
+  return apiCall<DeviceInfo[]>("library_sync_devices");
+}
+
+export async function renameSyncDevice(name: string): Promise<SyncStatus> {
+  return apiCall<SyncStatus>("library_sync_rename_device", { name });
+}
+
+/** First connect only: this computer becomes `device`. */
+export async function takeOverSyncDevice(device: string): Promise<SyncStatus> {
+  return apiCall<SyncStatus>("library_sync_take_over_device", { device });
+}
+
+/** First connect only: start from the installs of `from`, or of the latest backup. */
+export async function copySyncDeviceInstalls(from: string | null): Promise<SyncStatus> {
+  return apiCall<SyncStatus>("library_sync_copy_device_installs", { from });
+}
+
+export async function removeSyncDevice(
+  device: string,
+  choices: Record<string, DeviceItemChoice>
+): Promise<void> {
+  return apiCall<void>("library_sync_remove_device", { device, choices });
 }
