@@ -150,6 +150,12 @@ pub trait AccountServer {
   ) -> impl Future<Output = Result<SessionResponse, ServerError>> + Send;
 
   fn sign_out(&self, access_token: &str) -> impl Future<Output = Result<(), ServerError>> + Send;
+
+  /// `DELETE /account`: deletes the account and all its data on the server.
+  fn delete_account(
+    &self,
+    access_token: &str,
+  ) -> impl Future<Output = Result<(), ServerError>> + Send;
 }
 
 pub trait SecretStore {
@@ -278,11 +284,18 @@ impl<S: AccountServer, K: SecretStore> AccountManager<S, K> {
   /// A valid access token. It refreshes when it expires within the refresh margin.
   pub async fn access_token(&self) -> Result<String, AccountError> {
     let mut session = self.session.lock().await;
+    self.access_token_locked(&mut session).await
+  }
+
+  async fn access_token_locked(
+    &self,
+    session: &mut Option<StoredSession>,
+  ) -> Result<String, AccountError> {
     let current = session.as_ref().ok_or(AccountError::SignedOut)?;
     if (self.now)() + REFRESH_MARGIN_SECS < current.expires_at {
       return Ok(current.access_token.clone());
     }
-    self.refresh_locked(&mut session).await
+    self.refresh_locked(session).await
   }
 
   /// A new access token after the server gave `401` for `rejected`. When another caller
@@ -311,11 +324,7 @@ impl<S: AccountServer, K: SecretStore> AccountManager<S, K> {
         Ok(token)
       },
       Err(ServerError::Unauthorized) => {
-        // Local favorites stay for the next sign-in.
-        *session = None;
-        if let Err(error) = self.secrets.delete(SESSION_KEY) {
-          tracing::warn!("Failed to delete the revoked account session: {error}");
-        }
+        self.forget_revoked(session);
         Err(AccountError::SignedOut)
       },
       Err(ServerError::Rejected(message) | ServerError::Failed(message)) => {
@@ -345,6 +354,50 @@ impl<S: AccountServer, K: SecretStore> AccountManager<S, K> {
       }
     }
     cleared
+  }
+
+  /// The session the server does not accept any more. Local favorites stay for the next
+  /// sign-in.
+  fn forget_revoked(&self, session: &mut Option<StoredSession>) {
+    *session = None;
+    if let Err(error) = self.secrets.delete(SESSION_KEY) {
+      tracing::warn!("Failed to delete the revoked account session: {error}");
+    }
+  }
+
+  /// Deletes the account on the server, then deletes the tokens and clears the favorites and
+  /// the sync cursor of this device. On a failure nothing local changes. A `401` refreshes
+  /// once; a `401` that the refresh does not fix signs out and keeps the favorites, as for a
+  /// revoked session.
+  pub async fn delete_account(&self) -> Result<(), AccountError> {
+    // The lock is held across the request: a refresh in this time could keep a session of
+    // the deleted account.
+    let mut session = self.session.lock().await;
+    let mut token = self.access_token_locked(&mut session).await?;
+    let mut refreshed = false;
+    loop {
+      match self.server.delete_account(&token).await {
+        Ok(()) => break,
+        Err(ServerError::Unauthorized) if !refreshed => {
+          refreshed = true;
+          token = self.refresh_locked(&mut session).await?;
+        },
+        Err(ServerError::Unauthorized) => {
+          self.forget_revoked(&mut session);
+          return Err(AccountError::SignedOut);
+        },
+        Err(ServerError::Rejected(message) | ServerError::Failed(message)) => {
+          return Err(AccountError::Failed(message));
+        },
+      }
+    }
+    *session = None;
+    self
+      .secrets
+      .delete(SESSION_KEY)
+      .and_then(|()| self.secrets.delete(PENDING_KEY))
+      .and_then(|()| favorites_service::clear_store(&self.favorites_path))
+      .map_err(AccountError::Failed)
   }
 
   /// An access token the server accepts for sign-out. An expired one refreshes first, so the
@@ -565,6 +618,15 @@ impl AccountServer for HttpAccountServer {
       .await
       .map(|_| ())
   }
+
+  async fn delete_account(&self, access_token: &str) -> Result<(), ServerError> {
+    let request = self
+      .client
+      .delete(format!("{}/api/account", self.base_url))
+      .header("X-API-Key", &self.api_key)
+      .bearer_auth(access_token);
+    check(request.send().await).await.map(|_| ())
+  }
 }
 
 #[cfg(test)]
@@ -616,6 +678,10 @@ mod tests {
     refreshes: u32,
     exchanges: Vec<(String, String)>,
     offline: bool,
+    /// The account was deleted.
+    deleted: bool,
+    /// Tokens of `DELETE /account` calls.
+    deletes: Vec<String>,
     /// Access tokens and their expiry, in the clock of the test.
     access: HashMap<String, i64>,
     clock: Arc<AtomicI64>,
@@ -708,6 +774,23 @@ mod tests {
           _ => return Err(ServerError::Unauthorized),
         }
         state.revoked_access.push(access_token.to_string());
+        state.valid_refresh.clear();
+        Ok(())
+      })
+    }
+
+    async fn delete_account(&self, access_token: &str) -> Result<(), ServerError> {
+      self.with(|state| {
+        state.deletes.push(access_token.to_string());
+        if state.offline {
+          return Err(ServerError::Failed("offline".to_string()));
+        }
+        let now = state.clock.load(Ordering::SeqCst);
+        match state.access.get(access_token) {
+          Some(expires_at) if *expires_at > now && !state.deleted => {},
+          _ => return Err(ServerError::Unauthorized),
+        }
+        state.deleted = true;
         state.valid_refresh.clear();
         Ok(())
       })
@@ -1226,6 +1309,153 @@ mod tests {
     assert!(setup.secret(PENDING_KEY).is_none());
   }
 
+  /// Favorites of an account with a sync cursor, saved before the sign-in.
+  fn synced_favorites(setup: &Setup) -> FavoriteStore {
+    let mut store = FavoriteStore::default();
+    store.begin_account("12");
+    store.cursor = Some("8".to_string());
+    store
+      .set(
+        "42",
+        true,
+        Some(FavoriteSnapshot {
+          name: "pdf".to_string(),
+          source: "team/tools".to_string(),
+          description: None,
+        }),
+        1,
+      )
+      .unwrap();
+    favorites_service::save_store(&setup.favorites, &store).unwrap();
+    store
+  }
+
+  #[test]
+  fn delete_account_deletes_on_the_server_then_tokens_favorites_and_cursor() {
+    let setup = Setup::new();
+    synced_favorites(&setup);
+    let manager = signed_in(&setup);
+
+    block_on(manager.delete_account()).unwrap();
+
+    assert_eq!(
+      setup.server.with(|state| state.deletes.clone()),
+      ["access-1"]
+    );
+    assert!(setup.server.with(|state| state.deleted));
+    assert!(setup.secret(SESSION_KEY).is_none());
+    assert_eq!(block_on(manager.status()).identity, None);
+    assert_eq!(
+      favorites_service::load_store(&setup.favorites).unwrap(),
+      FavoriteStore::default()
+    );
+    assert_eq!(
+      block_on(setup.manager().access_token()),
+      Err(AccountError::SignedOut)
+    );
+  }
+
+  #[test]
+  fn a_failed_delete_changes_nothing_local_and_can_be_retried() {
+    let setup = Setup::new();
+    let store = synced_favorites(&setup);
+    let manager = signed_in(&setup);
+    let session = setup.secret(SESSION_KEY);
+    setup.server.with(|state| state.offline = true);
+
+    assert!(matches!(
+      block_on(manager.delete_account()),
+      Err(AccountError::Failed(_))
+    ));
+    assert!(!setup.server.with(|state| state.deleted));
+    assert_eq!(setup.secret(SESSION_KEY), session);
+    assert!(block_on(manager.status()).identity.is_some());
+    assert_eq!(
+      favorites_service::load_store(&setup.favorites).unwrap(),
+      store
+    );
+
+    setup.server.with(|state| state.offline = false);
+    block_on(manager.delete_account()).unwrap();
+    assert!(setup.server.with(|state| state.deleted));
+    assert_eq!(block_on(manager.status()).identity, None);
+  }
+
+  #[test]
+  fn delete_account_refreshes_an_expired_access_token_first() {
+    let setup = Setup::new();
+    let manager = signed_in(&setup);
+    setup.advance(900);
+    block_on(manager.delete_account()).unwrap();
+    assert_eq!(
+      setup.server.with(|state| state.deletes.clone()),
+      ["access-2"]
+    );
+    assert!(setup.server.with(|state| state.deleted));
+  }
+
+  #[test]
+  fn a_401_on_delete_refreshes_once_and_retries() {
+    let setup = Setup::new();
+    let manager = signed_in(&setup);
+    // The server revoked the access token early; the refresh token still works.
+    setup.server.with(|state| state.access.clear());
+    block_on(manager.delete_account()).unwrap();
+    assert_eq!(
+      setup.server.with(|state| state.deletes.clone()),
+      ["access-1", "access-2"]
+    );
+    assert_eq!(block_on(manager.status()).identity, None);
+  }
+
+  #[test]
+  fn a_401_on_delete_that_a_refresh_cannot_fix_signs_out_and_keeps_favorites() {
+    let setup = Setup::new();
+    let store = synced_favorites(&setup);
+    let manager = signed_in(&setup);
+    setup.server.with(|state| {
+      state.access.clear();
+      state.valid_refresh.clear();
+    });
+
+    assert_eq!(
+      block_on(manager.delete_account()),
+      Err(AccountError::SignedOut)
+    );
+    assert_eq!(setup.server.with(|state| state.deletes.len()), 1);
+    assert!(!setup.server.with(|state| state.deleted));
+    assert!(setup.secret(SESSION_KEY).is_none());
+    assert_eq!(block_on(manager.status()).identity, None);
+    assert_eq!(
+      favorites_service::load_store(&setup.favorites).unwrap(),
+      store
+    );
+  }
+
+  #[test]
+  fn a_second_401_after_the_refresh_signs_out() {
+    let setup = Setup::new();
+    let manager = signed_in(&setup);
+    // Every access token gives 401, also the refreshed one.
+    setup.server.with(|state| state.deleted = true);
+    assert_eq!(
+      block_on(manager.delete_account()),
+      Err(AccountError::SignedOut)
+    );
+    assert_eq!(setup.server.with(|state| state.deletes.len()), 2);
+    assert!(setup.secret(SESSION_KEY).is_none());
+  }
+
+  #[test]
+  fn delete_account_when_signed_out_is_signed_out() {
+    let setup = Setup::new();
+    assert_eq!(
+      block_on(setup.manager().delete_account()),
+      Err(AccountError::SignedOut)
+    );
+    assert!(setup.server.with(|state| state.deletes.is_empty()));
+  }
+
   fn state_of(start: &str) -> String {
     Url::parse(start)
       .unwrap()
@@ -1321,6 +1551,24 @@ mod tests {
     let request = request.join().unwrap().to_ascii_lowercase();
     assert!(request.starts_with("post /api/account/sign-out "));
     assert!(request.contains("authorization: bearer a"));
+  }
+
+  #[test]
+  fn the_http_delete_account_sends_delete_with_key_and_bearer_token() {
+    let (base, request) = http_once(204, "");
+    let server = HttpAccountServer::new(&base, "key").unwrap();
+    block_on(server.delete_account("a")).unwrap();
+    let request = request.join().unwrap().to_ascii_lowercase();
+    assert!(request.starts_with("delete /api/account "));
+    assert!(request.contains("x-api-key: key"));
+    assert!(request.contains("authorization: bearer a"));
+
+    let (base, _request) = http_once(503, "");
+    let server = HttpAccountServer::new(&base, "key").unwrap();
+    assert!(matches!(
+      block_on(server.delete_account("a")),
+      Err(ServerError::Failed(_))
+    ));
   }
 
   #[test]

@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Favorite marketplace skills from the list or the detail page, without an account, and see them in the new Favorites view of the Marketplace. A favorite whose skill left the marketplace shows as unavailable with its saved name and source and can be removed ([#63](https://github.com/wanggang316/youskill/issues/63)).
 - Sign in to an account with GitHub or Apple in Settings > Account. Sign-in runs in the system browser and returns to the app through a `youskill://` link; the tokens are kept in the OS keychain. Sign-out removes the favorites from this computer ([#67](https://github.com/wanggang316/youskill/issues/67)).
 - Favorites sync with the signed-in account, so other computers and the iOS app show the same favorites. Sync runs at app start, after sign-in, when the window gets focus, and shortly after a change; changes made offline sync later. The first sign-in keeps all favorites of this computer, also ones the account removed. An add over the account limit is removed again with a message. Sign-out sends the last changes before it removes the favorites from this computer ([#68](https://github.com/wanggang316/youskill/issues/68)).
+- Delete the account in Settings > Account after a confirmation. The server deletes the account and all its favorites at once; this computer signs out and removes its favorites ([#69](https://github.com/wanggang316/youskill/issues/69)).
 
 ### Changed
 

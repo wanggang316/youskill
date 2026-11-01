@@ -363,6 +363,7 @@ pub(crate) mod tests {
   pub(crate) struct Sessions {
     pub revoked: AtomicBool,
     pub signed_out: AtomicBool,
+    pub deleted: AtomicBool,
   }
 
   impl AccountServer for Arc<Sessions> {
@@ -390,6 +391,10 @@ pub(crate) mod tests {
     }
     async fn sign_out(&self, _: &str) -> Result<(), ServerError> {
       self.signed_out.store(true, Ordering::SeqCst);
+      Ok(())
+    }
+    async fn delete_account(&self, _: &str) -> Result<(), ServerError> {
+      self.deleted.store(true, Ordering::SeqCst);
       Ok(())
     }
   }

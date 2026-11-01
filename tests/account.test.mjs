@@ -13,10 +13,16 @@ const { createAccount } = await server.ssrLoadModule("/src/lib/stores/account.ts
 const octo = { accountId: "12", provider: "github", displayName: "octo" };
 
 /** A fake backend: the test sends account change events by hand. */
-function setup({ identity = null, failStart = false, lastError = null } = {}) {
+function setup({
+  identity = null,
+  failStart = false,
+  lastError = null,
+  deleteResult = { status: { identity: null }, error: null },
+} = {}) {
   let emit = () => {};
   const opened = [];
   let signedOut = 0;
+  let deletes = 0;
   const account = createAccount(
     {
       status: async () => ({ status: { identity }, error: lastError }),
@@ -25,6 +31,11 @@ function setup({ identity = null, failStart = false, lastError = null } = {}) {
         return `https://api.example.test/api/account/sign-in/${provider}`;
       },
       signOut: async () => ({ identity: null }),
+      deleteAccount: async () => {
+        deletes++;
+        if (deleteResult instanceof Error) throw deleteResult;
+        return deleteResult;
+      },
       openUrl: async (url) => opened.push(url),
       listen: async (handler) => {
         emit = handler;
@@ -43,6 +54,7 @@ function setup({ identity = null, failStart = false, lastError = null } = {}) {
     read: () => state,
     emit: (event) => emit(event),
     signedOut: () => signedOut,
+    deletes: () => deletes,
   };
 }
 
@@ -106,4 +118,50 @@ test("a failure of a link that started the app shows after the load", async () =
   const { account, read } = setup({ lastError: "Sign-in failed (server_error). Try again." });
   await account.load();
   assert.equal(read().error, "Sign-in failed (server_error). Try again.");
+});
+
+test("a deleted account shows signed out and reloads the cleared favorites", async () => {
+  const { account, read, signedOut, deletes } = setup({ identity: octo });
+  await account.load();
+  assert.equal(await account.deleteAccount(), true);
+  assert.equal(deletes(), 1);
+  assert.equal(read().identity, null);
+  assert.equal(read().deleting, false);
+  assert.equal(read().error, "");
+  assert.equal(signedOut(), 1);
+});
+
+test("a failed deletion keeps the account, shows the error and can be retried", async () => {
+  const failed = { status: { identity: octo }, error: "Failed to delete the account: offline" };
+  const { account, read, signedOut, deletes } = setup({ identity: octo, deleteResult: failed });
+  await account.load();
+  assert.equal(await account.deleteAccount(), false);
+  assert.deepEqual(read().identity, octo);
+  assert.equal(read().error, "Failed to delete the account: offline");
+  assert.equal(read().deleting, false);
+  assert.equal(signedOut(), 0);
+
+  assert.equal(await account.deleteAccount(), false);
+  assert.equal(deletes(), 2);
+});
+
+test("a deletion of an ended session shows signed out and keeps the favorites", async () => {
+  const ended = {
+    status: { identity: null },
+    error: "The session ended. Sign in again to delete the account.",
+  };
+  const { account, read, signedOut } = setup({ identity: octo, deleteResult: ended });
+  await account.load();
+  assert.equal(await account.deleteAccount(), false);
+  assert.equal(read().identity, null);
+  assert.equal(read().error, "The session ended. Sign in again to delete the account.");
+  assert.equal(signedOut(), 0);
+});
+
+test("a deletion that the backend cannot run shows the error", async () => {
+  const { account, read } = setup({ identity: octo, deleteResult: new Error("ipc failed") });
+  await account.load();
+  assert.equal(await account.deleteAccount(), false);
+  assert.deepEqual(read().identity, octo);
+  assert.equal(read().error, "ipc failed");
 });

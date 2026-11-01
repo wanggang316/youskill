@@ -18,7 +18,7 @@ mod tray;
 use youskill_core::{config, models, services, utils};
 
 use commands::{
-  account::{account_sign_in, account_sign_out, account_status},
+  account::{account_delete, account_sign_in, account_sign_out, account_status},
   agent_apps::{
     add_user_agent_app, list_local_agent_apps, refresh_agent_apps, remove_user_agent_app,
     update_user_agent_app,
@@ -193,6 +193,7 @@ fn main() {
       account_status,
       account_sign_in,
       account_sign_out,
+      account_delete,
       get_settings,
       update_settings,
       cli_status,

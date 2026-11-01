@@ -3,7 +3,7 @@
 
 use crate::account::{emit_changed, Account, AccountChanged, LastError};
 use tauri::{AppHandle, State};
-use youskill_core::services::account_service::{AccountStatus, Provider};
+use youskill_core::services::account_service::{AccountError, AccountStatus, Provider};
 
 /// The status and the last sign-in failure that is not shown yet.
 #[tauri::command]
@@ -39,4 +39,21 @@ pub async fn account_sign_out(
   crate::favorite_sync::sign_out(&app).await?;
   emit_changed(&app, None).await;
   Ok(account.status().await)
+}
+
+/// Deletes the account on the server and the account data of this device. The result has the
+/// status after the attempt and the failure to show, if any.
+#[tauri::command]
+pub async fn account_delete(account: State<'_, Account>) -> Result<AccountChanged, String> {
+  let error = match account.delete_account().await {
+    Ok(()) => None,
+    Err(AccountError::SignedOut) => {
+      Some("The session ended. Sign in again to delete the account.".to_string())
+    },
+    Err(AccountError::Failed(message)) => Some(format!("Failed to delete the account: {message}")),
+  };
+  Ok(AccountChanged {
+    status: account.status().await,
+    error,
+  })
 }

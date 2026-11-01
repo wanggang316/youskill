@@ -346,6 +346,12 @@ Sign-out refreshes an expired access token first, deletes the keychain items and
 `favorites.json` (favorites, account binding and cursor), then revokes the session on the
 server (best effort) without the session lock. A cancel (`access_denied`) of a sign-in that
 a newer one replaced is ignored; a new sign-in clears the last callback error.
+`account_delete` sends `DELETE /api/account` with the session lock held, so no refresh can
+keep a session of the deleted account. An expired access token refreshes first; a `401`
+refreshes once and retries. After `204` it deletes the keychain items and `favorites.json`,
+as sign-out does. A network or server failure changes nothing local. A `401` that the
+refresh does not fix deletes the session and keeps `favorites.json`, as for a revoked
+session. The command returns the status after the attempt and the failure to show.
 
 ## Global Search
 
@@ -374,7 +380,7 @@ helpers of `navigation/app-shell.ts`.
 | Projects     | `list_user_projects`, `add_user_project`, `update_user_project`, `remove_user_project`, `list_workspaces`, `add_workspace`, `remove_workspace`, `scan_workspace`, `register_projects`, `list_memory_files`                                                                                                                                                                                             |
 | Search       | `global_search`                                                                                                                                                                                                                                                                                                                                                                                        |
 | Favorites    | `list_favorites`, `set_favorite`                                                                                                                                                                                                                                                                                                                                                                       |
-| Account      | `account_status`, `account_sign_in`, `account_sign_out`                                                                                                                                                                                                                                                                                                                                                |
+| Account      | `account_status`, `account_sign_in`, `account_sign_out`, `account_delete`                                                                                                                                                                                                                                                                                                                              |
 | Detection    | `detect_github_manual`, `detect_github_auto`, `detect_zip`, `detect_folder` (stage into a temp dir)                                                                                                                                                                                                                                                                                                    |
 | Other        | marketplace, agent apps, projects, settings, library sync, file readers, translation                                                                                                                                                                                                                                                                                                                   |
 
