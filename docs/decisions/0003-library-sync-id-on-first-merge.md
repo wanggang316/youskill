@@ -12,7 +12,7 @@ The repository is the shared library. Other computers that already synced use it
 
 - The id that is already in the backup repository wins. The local item takes it.
 - This is the only case in which an id changes. It happens once per item, on the first merge of a computer with a repository that has a library (no last synced commit).
-- A first merge pairs a local item and a remote item of the same kind when their content hash is equal, or when their source key is equal. An equal hash makes them the same item. An equal source key with a different hash makes a conflict.
+- A first merge pairs a local item and a remote item of the same kind when their content hash is equal, or when their source key is equal. An equal hash makes them the same item. An equal source key with a different hash makes a conflict. Only a GitHub source has a source key here: a folder path is local to one computer, and the repository does not hold it.
 - A rekey moves the local lock record and the hub directory or template file to the remote id. It keeps the name, install records, and install paths.
 - Replace remote is an explicit choice of the local library. In this mode local ids stay, and the repository items that the local library replaces are removed from the repository.
 - When the same id changed on both sides and the user keeps both, the remote version keeps the id. The local version gets a new id and a suffixed name. If the two versions have the same source key, the local version loses its source, because one source key gives at most one hub skill.

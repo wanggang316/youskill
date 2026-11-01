@@ -2371,3 +2371,351 @@ fn a_restore_before_this_device_joined_keeps_its_installs() {
     BackupResult::UpToDate
   );
 }
+
+fn set_instruction_source(env: &Env, id: &str, source: InstructionSource) {
+  instruction_service::update_lock(env, |lock| {
+    lock.instructions.get_mut(id).unwrap().source = source;
+    Ok(())
+  })
+  .unwrap();
+}
+
+fn skill_source(env: &Env, id: &str) -> SkillSource {
+  store(env).read().unwrap().skills[id].source.clone()
+}
+
+fn instruction_source(env: &Env, id: &str) -> InstructionSource {
+  instruction_service::read_lock(env).unwrap().instructions[id]
+    .source
+    .clone()
+}
+
+fn folder(path: &str) -> SkillSource {
+  SkillSource::Folder {
+    path: path.to_string(),
+  }
+}
+
+fn file_source(path: &str) -> InstructionSource {
+  InstructionSource::File {
+    path: path.to_string(),
+  }
+}
+
+#[test]
+fn local_source_paths_stay_on_this_computer() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  let home = a.home.to_string_lossy().to_string();
+  add_skill(&a, FOO, "foo", "v1");
+  set_source(&a, FOO, folder(&format!("{}/skills/foo", home)));
+  add_skill(&a, BAR, "bar", "v1");
+  set_source(
+    &a,
+    BAR,
+    SkillSource::Zip {
+      path: format!("{}/bar.zip", home),
+    },
+  );
+  add_instruction(&a, NOTE, "# rules\n");
+  set_instruction_source(
+    &a,
+    NOTE,
+    InstructionSource::Agent {
+      path: format!("{}/.claude/CLAUDE.md", home),
+    },
+  );
+  backup_with(&a, &repo).unwrap();
+
+  for path in [LIBRARY_FILE, README_FILE] {
+    let text = String::from_utf8(repo.head_file(path).unwrap()).unwrap();
+    assert!(!text.contains(&home), "{}: {}", path, text);
+  }
+  let readme = String::from_utf8(repo.head_file(README_FILE).unwrap()).unwrap();
+  assert!(readme.contains("| foo | folder |"), "{}", readme);
+  assert!(readme.contains("| bar | zip |"), "{}", readme);
+  // The source kind stays.
+  let library = library_at_head(&repo);
+  assert_eq!(library.skills[FOO].source, folder(""));
+  assert_eq!(
+    library.skills[BAR].source,
+    SkillSource::Zip {
+      path: String::new()
+    }
+  );
+  assert_eq!(
+    library.instructions[NOTE].source,
+    InstructionSource::Agent {
+      path: String::new()
+    }
+  );
+  // The local lock keeps the paths and nothing is left to back up.
+  assert_eq!(
+    skill_source(&a, FOO),
+    folder(&format!("{}/skills/foo", home))
+  );
+  assert!(status(&a).unwrap().changes.is_empty());
+}
+
+#[test]
+fn a_restore_keeps_the_local_source_path() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    set_source(a, FOO, folder("/a/foo"));
+    add_instruction(a, NOTE, "# v1\n");
+    set_instruction_source(a, NOTE, file_source("/a/rules.md"));
+  });
+  // B got the source kinds without the path of A.
+  assert_eq!(skill_source(&b, FOO), folder(""));
+  assert_eq!(instruction_source(&b, NOTE), file_source(""));
+
+  // B has the same items from its own folders.
+  set_source(&b, FOO, folder("/b/foo"));
+  set_instruction_source(&b, NOTE, file_source("/b/rules.md"));
+  assert!(status(&b).unwrap().changes.is_empty());
+
+  edit_skill(&a, FOO, "foo", "v2");
+  fs::write(a.instruction_file(NOTE), "# v2\n").unwrap();
+  instruction_service::update_lock(&a, |lock| {
+    lock.instructions.get_mut(NOTE).unwrap().hash =
+      crate::utils::hash::hash_file(&a.instruction_file(NOTE)).unwrap();
+    Ok(())
+  })
+  .unwrap();
+  assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
+
+  pull(&b, &repo);
+  assert!(skill_body(&b, FOO, "foo").contains("v2"));
+  assert_eq!(skill_source(&b, FOO), folder("/b/foo"));
+  assert_eq!(instruction_source(&b, NOTE), file_source("/b/rules.md"));
+  // The sources do not change on each sync.
+  assert!(status(&b).unwrap().changes.is_empty());
+  assert_eq!(
+    backup_with(&b, &repo).unwrap().result,
+    BackupResult::UpToDate
+  );
+  pull(&a, &repo);
+  assert_eq!(skill_source(&a, FOO), folder("/a/foo"));
+  assert_eq!(instruction_source(&a, NOTE), file_source("/a/rules.md"));
+}
+
+#[test]
+fn a_first_merge_does_not_pair_equal_folder_paths() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "from a");
+  set_source(&a, FOO, folder("/Users/me/skills/foo"));
+  backup_with(&a, &repo).unwrap();
+
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  add_skill(&b, BAR, "foo", "from b");
+  set_source(&b, BAR, folder("/Users/me/skills/foo"));
+  let planned = plan(&b, &repo, RestoreMode::Merge);
+  let foo = item(&planned, &skill_key(FOO));
+  assert_eq!(
+    (foo.local_id.as_deref(), foo.resolution),
+    (None, Resolution::TakeRemote)
+  );
+  assert_eq!(
+    item(&planned, &skill_key(BAR)).resolution,
+    Resolution::KeepLocal
+  );
+}
+
+#[test]
+fn source_paths_in_an_existing_repository_go_on_the_next_backup() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, _) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    set_source(a, FOO, folder("/a/foo"));
+    add_instruction(a, NOTE, "# rules\n");
+    set_instruction_source(a, NOTE, file_source("/a/rules.md"));
+  });
+  // An earlier version wrote the paths of another computer.
+  let mut library = library_at_head(&repo);
+  library.skills.get_mut(FOO).unwrap().source = folder("/old/foo");
+  library.instructions.get_mut(NOTE).unwrap().source = file_source("/old/rules.md");
+  let mut theirs = library.skills[FOO].clone();
+  theirs.name = "theirs".to_string();
+  theirs.scope = Scope::Device(OTHER_DEVICE.to_string());
+  library.skills.insert(OTHER_SKILL.to_string(), theirs);
+  commit_files(
+    &repo,
+    repo.files_at(&repo.head_commit(), ""),
+    &[
+      (LIBRARY_FILE, pretty_json(&library).unwrap()),
+      (
+        &format!("skills/{}/theirs/SKILL.md", OTHER_SKILL),
+        b"theirs".to_vec(),
+      ),
+    ],
+    "Backup from an old app",
+  );
+
+  // A new computer reads the library and gets no path of another computer.
+  let c = computer(tmp.path(), "c", &["claude-code"]);
+  assert_eq!(pull(&c, &repo).result, RestoreResult::Applied);
+  assert_eq!(skill_source(&c, FOO), folder(""));
+  assert_eq!(instruction_source(&c, NOTE), file_source(""));
+
+  // A keeps its own paths, and its next backup removes the paths from the repository.
+  pull(&a, &repo);
+  assert_eq!(skill_source(&a, FOO), folder("/a/foo"));
+  assert_eq!(instruction_source(&a, NOTE), file_source("/a/rules.md"));
+  backup_with(&a, &repo).unwrap();
+  let text = String::from_utf8(repo.head_file(LIBRARY_FILE).unwrap()).unwrap();
+  assert!(!text.contains("/old/"), "{}", text);
+  assert_eq!(library_at_head(&repo).skills[OTHER_SKILL].name, "theirs");
+}
+
+/// Replace the head with a commit whose `library.json` holds an absolute path in each local
+/// source, as versions before #72 wrote it.
+fn put_old_paths(repo: &FakeRepo) {
+  let mut library: serde_json::Value =
+    serde_json::from_slice(&repo.head_file(LIBRARY_FILE).unwrap()).unwrap();
+  for kind in ["skills", "instructions"] {
+    for (id, record) in library[kind].as_object_mut().unwrap().iter_mut() {
+      let source = record["source"].as_object_mut().unwrap();
+      if source.contains_key("path") {
+        source.insert("path".to_string(), format!("/old/{}", id).into());
+      }
+    }
+  }
+  commit_files(
+    repo,
+    repo.files_at(&repo.head_commit(), ""),
+    &[(LIBRARY_FILE, pretty_json(&library).unwrap())],
+    "Backup from an old app",
+  );
+}
+
+fn assert_no_old_paths(repo: &FakeRepo) {
+  let text = String::from_utf8(repo.head_file(LIBRARY_FILE).unwrap()).unwrap();
+  assert!(!text.contains("/old/"), "{}", text);
+}
+
+#[test]
+fn an_old_path_of_a_deferred_item_is_not_written_back() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    set_source(a, FOO, folder("/a/foo"));
+  });
+  edit_skill(&a, FOO, "foo", "v2");
+  backup_with(&a, &repo).unwrap();
+  put_old_paths(&repo);
+
+  // B leaves the change out, then backs up another item.
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  apply(
+    &b,
+    &repo,
+    &planned,
+    RestoreDecisions {
+      include: BTreeMap::from([(skill_key(FOO), false)]),
+      ..Default::default()
+    },
+  );
+  assert!(skill_body(&b, FOO, "foo").contains("v1"));
+  add_skill(&b, BAR, "bar", "v1");
+  assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
+  assert_no_old_paths(&repo);
+  // The deferred item is still offered, excluded by default, and B has nothing more to back up.
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  assert!(item(&planned, &skill_key(FOO)).deferred);
+  assert!(status(&b).unwrap().changes.is_empty());
+}
+
+#[test]
+fn an_old_path_of_an_incoming_item_is_not_written_back() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    set_source(a, FOO, folder("/a/foo"));
+  });
+  edit_skill(&a, FOO, "foo", "v2");
+  backup_with(&a, &repo).unwrap();
+  put_old_paths(&repo);
+
+  // B backs up another item on the moved head; the change of A becomes incoming.
+  add_skill(&b, BAR, "bar", "v1");
+  let backup = backup_with(&b, &repo).unwrap();
+  assert_eq!((backup.result, backup.incoming), (BackupResult::Pushed, 1));
+  assert_no_old_paths(&repo);
+  add_skill(&b, BAZ, "baz", "v1");
+  assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
+  assert_no_old_paths(&repo);
+  assert!(status(&b).unwrap().changes.is_empty());
+
+  pull(&b, &repo);
+  assert!(skill_body(&b, FOO, "foo").contains("v2"));
+  assert_eq!(skill_source(&b, FOO), folder(""));
+}
+
+#[test]
+fn the_migration_removes_old_paths() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  set_source(&a, FOO, folder("/a/foo"));
+  add_instruction(&a, NOTE, "# rules\n");
+  set_instruction_source(&a, NOTE, file_source("/a/rules.md"));
+  backup_with(&a, &repo).unwrap();
+  downgrade_head(&repo, &[]);
+  put_old_paths(&repo);
+  old_app_state(&a, &repo);
+
+  migrate_with(&a, &repo).unwrap();
+  assert_eq!(library_at_head(&repo).version, 2);
+  assert_no_old_paths(&repo);
+  assert!(status(&a).unwrap().changes.is_empty());
+  assert_eq!(
+    backup_with(&a, &repo).unwrap().result,
+    BackupResult::UpToDate
+  );
+  assert_eq!(skill_source(&a, FOO), folder("/a/foo"));
+}
+
+#[test]
+fn an_unchanged_backup_removes_old_paths_once() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  set_source(&a, FOO, folder("/a/foo"));
+  backup_with(&a, &repo).unwrap();
+  let clean = repo.head_commit();
+  put_old_paths(&repo);
+  // A restore commits its merged library, which has no old paths.
+  assert!(pull(&a, &repo).pushed);
+  assert_no_old_paths(&repo);
+
+  // A computer whose base is the commit with the paths, as a sync with an earlier version
+  // left it.
+  let old = repo.files_at(&repo.parent_of(&repo.head_commit()).unwrap(), "");
+  let library = commit_files(&repo, old, &[], "Backup from an old app");
+  assert_ne!(library, clean);
+  let mut state = read_state(&a).unwrap();
+  state.last_synced_commit = Some(library);
+  state.base_files = repo.files_at(&repo.head_commit(), "");
+  state.base_library = Some(library_at_head(&repo));
+  write_state(&a, &state).unwrap();
+  assert!(status(&a).unwrap().changes.is_empty());
+
+  assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
+  assert_no_old_paths(&repo);
+  let commits = repo.commit_count();
+  assert_eq!(
+    backup_with(&a, &repo).unwrap().result,
+    BackupResult::UpToDate
+  );
+  assert_eq!(repo.commit_count(), commits);
+}

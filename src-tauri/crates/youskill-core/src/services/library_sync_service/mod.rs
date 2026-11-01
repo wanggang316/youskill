@@ -119,6 +119,21 @@ impl Default for LibraryFile {
   }
 }
 
+impl LibraryFile {
+  /// Remove the paths of local sources. Every library read from the repository or the sync
+  /// state goes through this, so a path that an earlier version wrote is never carried,
+  /// compared or written again.
+  fn without_local_paths(mut self) -> Self {
+    for skill in self.skills.values_mut() {
+      skill.source = shared_source(&skill.source);
+    }
+    for instruction in self.instructions.values_mut() {
+      instruction.source = shared_instruction_source(&instruction.source);
+    }
+    self
+  }
+}
+
 /// A skill record. A version 1 record also has `agents`, which is ignored: read as
 /// version 2, every version 1 item is shared and has no installs.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -361,6 +376,18 @@ pub fn read_state(env: &Env) -> Result<SyncState, String> {
   state
     .deferred
     .retain(|key, version| split_key(key).is_some() && version.entry != Entry::Legacy);
+  state.base_library = state.base_library.map(LibraryFile::without_local_paths);
+  for version in state.deferred.values_mut() {
+    version.strip_local_paths();
+  }
+  for incoming in state.incoming.values_mut() {
+    for version in [&mut incoming.base, &mut incoming.remote]
+      .into_iter()
+      .flatten()
+    {
+      version.strip_local_paths();
+    }
+  }
   Ok(state)
 }
 
@@ -619,11 +646,12 @@ impl ItemVersion {
     self.files == other.files && strip(&self.entry) == strip(&other.entry)
   }
 
-  /// The source key that pairs items on a first merge: a GitHub or folder source.
+  /// The source key that pairs items on a first merge: a GitHub source. A folder path is
+  /// local to one computer, so equal paths on two computers are not the same source.
   fn source_key(&self) -> Option<String> {
     match &self.entry {
       Entry::Skill(skill) => match &skill.source {
-        SkillSource::Github { .. } | SkillSource::Folder { .. } => Some(skill.source.key()),
+        SkillSource::Github { .. } => Some(skill.source.key()),
         _ => None,
       },
       Entry::Instruction(instruction) => match &instruction.source {
@@ -640,6 +668,17 @@ impl ItemVersion {
         _ => None,
       },
       Entry::Agent(_) | Entry::Legacy => None,
+    }
+  }
+
+  /// Remove the path of a local source (see `LibraryFile::without_local_paths`).
+  fn strip_local_paths(&mut self) {
+    match &mut self.entry {
+      Entry::Skill(skill) => skill.source = shared_source(&skill.source),
+      Entry::Instruction(instruction) => {
+        instruction.source = shared_instruction_source(&instruction.source)
+      },
+      Entry::Agent(_) | Entry::Legacy => {},
     }
   }
 
@@ -885,8 +924,37 @@ fn effective_agents(
   set.into_iter().collect()
 }
 
-/// A GitHub source without the fields `check_source_updates` keeps refreshing.
+/// The source a backup writes: a GitHub source without the update check fields, a local
+/// source (`folder`, `zip`) without its path. The path is valid only on the computer that
+/// imported the item.
 fn shared_source(source: &SkillSource) -> SkillSource {
+  match source {
+    SkillSource::Folder { .. } => SkillSource::Folder {
+      path: String::new(),
+    },
+    SkillSource::Zip { .. } => SkillSource::Zip {
+      path: String::new(),
+    },
+    other => without_check_fields(other),
+  }
+}
+
+/// The instruction source a backup writes: a local source (`file`, `agent`) without its
+/// path.
+fn shared_instruction_source(source: &InstructionSource) -> InstructionSource {
+  match source {
+    InstructionSource::File { .. } => InstructionSource::File {
+      path: String::new(),
+    },
+    InstructionSource::Agent { .. } => InstructionSource::Agent {
+      path: String::new(),
+    },
+    other => other.clone(),
+  }
+}
+
+/// A GitHub source without the fields `check_source_updates` keeps refreshing.
+fn without_check_fields(source: &SkillSource) -> SkillSource {
   match source {
     SkillSource::Github {
       repo,
@@ -910,9 +978,15 @@ fn shared_source(source: &SkillSource) -> SkillSource {
   }
 }
 
-/// A pulled source, keeping this computer's last update check when the location is the same.
+/// A pulled source. A GitHub source keeps this computer's last update check when the
+/// location is the same. A local source keeps this computer's path when the kind is the
+/// same, else it has no path: a path in the repository (written before paths stayed local)
+/// belongs to another computer. A new item has `SkillSource::None` as `local`.
 fn merged_source(local: &SkillSource, remote: &SkillSource) -> SkillSource {
   match (local, remote) {
+    (SkillSource::Folder { .. }, SkillSource::Folder { .. })
+    | (SkillSource::Zip { .. }, SkillSource::Zip { .. }) => local.clone(),
+    (_, SkillSource::Folder { .. } | SkillSource::Zip { .. }) => shared_source(remote),
     (
       SkillSource::Github {
         latest_remote_sha,
@@ -939,6 +1013,27 @@ fn merged_source(local: &SkillSource, remote: &SkillSource) -> SkillSource {
       checked_at: checked_at.clone(),
     },
     _ => remote.clone(),
+  }
+}
+
+/// A pulled instruction source: a local source keeps this computer's path when the kind is
+/// the same, else it has no path (see `merged_source`).
+fn merged_instruction_source(
+  local: &InstructionSource,
+  remote: &InstructionSource,
+) -> InstructionSource {
+  match (local, remote) {
+    (InstructionSource::File { .. }, InstructionSource::File { .. })
+    | (InstructionSource::Agent { .. }, InstructionSource::Agent { .. }) => local.clone(),
+    _ => shared_instruction_source(remote),
+  }
+}
+
+/// The source column of the README: the source key without a local path.
+fn readme_source(source: &SkillSource) -> String {
+  match source {
+    SkillSource::Folder { .. } => "folder".to_string(),
+    other => other.key(),
   }
 }
 
@@ -1038,7 +1133,7 @@ fn readme(library: &LibraryFile) -> Vec<u8> {
       text.push_str(&format!(
         "| {} | {} |\n",
         table_cell(&skill.name),
-        table_cell(&skill.source.key())
+        table_cell(&readme_source(&skill.source))
       ));
     }
   }
@@ -1228,7 +1323,7 @@ fn local_snapshot(env: &Env, state: &SyncState, device: &str) -> Result<Snapshot
       id.clone(),
       LibraryInstruction {
         name: record.name.clone(),
-        source: record.source.clone(),
+        source: shared_instruction_source(&record.source),
         hash: record.hash.clone(),
         imported_at: record.imported_at.clone(),
         updated_at: record.updated_at.clone(),
@@ -1732,8 +1827,13 @@ pub fn backup_with(env: &Env, remote: &dyn RemoteRepo) -> Result<BackupOutcome, 
       if base.library.version < LIBRARY_VERSION {
         return Ok(outcome(BackupResult::MigrationRequired, None, changes));
       }
+      // Without changes a backup still writes a `library.json` that holds local paths of
+      // an earlier version: the library read from it has none, so the files differ.
       if changes.is_empty() {
-        return Ok(outcome(BackupResult::UpToDate, Some(base_commit), changes));
+        let composed = compose(&snapshot, &base.foreign(&device), &device, None)?;
+        if composed.tree.get(LIBRARY_FILE) == base.files.get(LIBRARY_FILE) {
+          return Ok(outcome(BackupResult::UpToDate, Some(base_commit), changes));
+        }
       }
       base.clone()
     },
