@@ -403,6 +403,11 @@
           {#if $favoritesState.error}
             <p class="text-error px-6 pt-4 text-sm" role="alert">{$favoritesState.error}</p>
           {/if}
+          {#if $favoritesState.limitReached}
+            <p class="text-error px-6 pt-4 text-sm" role="alert">
+              {$t("market.favorites.limitReached")}
+            </p>
+          {/if}
           {#if showingFavorites}
             {#if !shownFavorites.length}
               <p class="text-base-content-muted p-12 text-center text-sm">

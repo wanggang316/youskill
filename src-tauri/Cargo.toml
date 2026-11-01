@@ -18,7 +18,7 @@ build = "build.rs"
 [dependencies]
 youskill-core = { path = "crates/youskill-core" }
 tauri = { version = "2", features = ["tray-icon", "macos-private-api"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tauri-plugin-dialog = "2"

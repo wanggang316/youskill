@@ -168,3 +168,35 @@ test("the Favorites view does not fetch and keeps the browse selection", async (
   assert.equal(state.categoryId, 7);
   assert.equal(calls.at(-1).tagId, 7);
 });
+
+test("a sync reloads the list and shows a reverted add over the account limit", async () => {
+  let records = [];
+  let handler;
+  let listens = 0;
+  const favorites = createFavorites({
+    list: async () => records,
+    set: async () => records,
+    listen: async (next) => {
+      listens += 1;
+      handler = next;
+    },
+  });
+  let state;
+  favorites.state.subscribe((value) => (state = value));
+  await favorites.load();
+  await favorites.load();
+  assert.equal(listens, 1);
+
+  records = [{ skillId: "2", favorited: true, updatedAt: 1, snapshot: {}, pending: false }];
+  handler({ limitReached: ["5"], rejected: [] });
+  await new Promise((resolve) => setTimeout(resolve));
+  assert.deepEqual(
+    state.items.map((item) => item.skillId),
+    ["2"]
+  );
+  assert.equal(state.limitReached, true);
+
+  // The next change hides the message.
+  await favorites.remove("2");
+  assert.equal(state.limitReached, false);
+});

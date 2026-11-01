@@ -30,12 +30,13 @@ pub fn account_sign_in(
   account.begin_sign_in(provider)
 }
 
+/// Pushes pending favorite changes (best effort), then signs out and clears the favorites.
 #[tauri::command]
 pub async fn account_sign_out(
   app: AppHandle,
   account: State<'_, Account>,
 ) -> Result<AccountStatus, String> {
-  account.sign_out().await?;
+  crate::favorite_sync::sign_out(&app).await?;
   emit_changed(&app, None).await;
   Ok(account.status().await)
 }

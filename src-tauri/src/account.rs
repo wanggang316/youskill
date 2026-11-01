@@ -124,6 +124,11 @@ fn handle_link(app: &AppHandle, link: String) {
     let outcome = app.state::<Account>().complete_sign_in(&link).await;
     let error = match outcome {
       Ok(CallbackOutcome::Ignored) => return,
+      Ok(outcome @ CallbackOutcome::SignedIn(_)) => {
+        tracing::info!("Sign-in callback: {outcome:?}");
+        crate::favorite_sync::request(&app, crate::favorite_sync::NOW);
+        None
+      },
       Ok(outcome) => {
         tracing::info!("Sign-in callback: {outcome:?}");
         None
