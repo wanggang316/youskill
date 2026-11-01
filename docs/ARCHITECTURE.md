@@ -263,9 +263,10 @@ Item scope and devices (ADR 0004, "Edits and scope changes" and "Devices"):
   `madeDeviceOnly` (removed by default). A local item that stays after a restore (kept,
   `keep_local`, or written from an earlier commit) whose id is a device-only item of another
   device at the head moves to a new id as a device-only item of this device; installs follow
-  it, and a custom agent's id changes in the install records too.
+  it, it loses its source (the original keeps the source key), and a custom agent's id
+  changes in the install records too.
 - `copy_device_item(key)` copies a device-only item of another device from the head as a
-  device-only item of this device with a new id.
+  device-only item of this device with a new id and without a source.
 - `devices` lists the device files, the owners of device-only items and this computer.
   `rename_device` changes the name the next backup writes into the device file.
 - On the first connect only (no base): `take_over_device(id)` sets the device id, so the

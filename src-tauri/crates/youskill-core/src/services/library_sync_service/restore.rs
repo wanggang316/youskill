@@ -796,7 +796,11 @@ pub fn apply_restore_with(
     let new_key = key_of(kind, new_id);
     match kind {
       ItemKind::Agent => super::scope::reid_agent(env, id, new_id)?,
-      _ => rekey(env, key, &new_key)?,
+      _ => {
+        rekey(env, key, &new_key)?;
+        // The item of the other device keeps the source key.
+        super::scope::detach_source(env, &new_key)?;
+      },
     }
     reided.push((key.clone(), new_key));
   }

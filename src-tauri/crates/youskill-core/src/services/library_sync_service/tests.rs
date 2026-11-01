@@ -2849,3 +2849,49 @@ fn removing_a_device_shares_gives_or_deletes_each_of_its_items() {
   assert!(skills.contains_key(FOO) && skills.contains_key(BAR) && !skills.contains_key(BAZ));
   assert_eq!(devices_with(&c, &repo).unwrap().len(), 2);
 }
+
+/// Source keys of the hub skills of `env`, one per skill that has one.
+fn source_keys(env: &Env) -> Vec<String> {
+  store(env)
+    .read()
+    .unwrap()
+    .skills
+    .values()
+    .filter(|record| !matches!(record.source, SkillSource::None))
+    .map(|record| record.source.key())
+    .collect()
+}
+
+#[test]
+fn copies_of_another_devices_item_lose_its_source() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    set_source(a, FOO, github_source("skills/foo"));
+  });
+  make_device_only(&a, &skill_key(FOO));
+  backup_with(&a, &repo).unwrap();
+
+  // B keeps its copy; C copies the item of A.
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  let mut decisions = RestoreDecisions::default();
+  decisions
+    .removals
+    .insert(skill_key(FOO), RemovalChoice::Keep);
+  apply(&b, &repo, &planned, decisions);
+  let c = computer(tmp.path(), "c", &["claude-code"]);
+  pull(&c, &repo);
+  copy_device_item_with(&c, &repo, &skill_key(FOO)).unwrap();
+  backup_with(&c, &repo).unwrap();
+  pull(&b, &repo);
+
+  // A shares the item again: each device has it once with its source.
+  set_item_scope(&a, &skill_key(FOO), ItemScope::Shared).unwrap();
+  backup_with(&a, &repo).unwrap();
+  for env in [&b, &c] {
+    pull(env, &repo);
+    assert_eq!(skills_named(env, "foo").len(), 2);
+    assert_eq!(source_keys(env), source_keys(&a));
+  }
+}

@@ -155,7 +155,8 @@ pub fn copy_device_item_with(
           new_id.clone(),
           SkillRecord {
             name: skill.name.clone(),
-            source: skill.source.clone(),
+            // The original keeps the source key: one source key gives one hub skill.
+            source: SkillSource::None,
             hash,
             imported_at: skill.imported_at.clone(),
             updated_at: now_rfc3339(),
@@ -178,7 +179,7 @@ pub fn copy_device_item_with(
           new_id.clone(),
           InstructionRecord {
             name: instruction.name.clone(),
-            source: instruction.source.clone(),
+            source: InstructionSource::None,
             hash: instruction.hash.clone(),
             imported_at: instruction.imported_at.clone(),
             updated_at: now_rfc3339(),
@@ -207,6 +208,25 @@ pub fn copy_device_item_with(
     .insert(new_key.clone(), Scope::Device(device.clone()));
   write_state(env, &state)?;
   Ok(new_key)
+}
+
+/// Clear the source of the local item `key`, a copy whose original keeps the source key.
+pub(super) fn detach_source(env: &Env, key: &str) -> Result<(), String> {
+  match split_key(key) {
+    Some((ItemKind::Skill, id)) => store(env).update(|lock| {
+      if let Some(record) = lock.skills.get_mut(id) {
+        record.source = SkillSource::None;
+      }
+      Ok(())
+    }),
+    Some((ItemKind::Instruction, id)) => instruction_service::update_lock(env, |lock| {
+      if let Some(record) = lock.instructions.get_mut(id) {
+        record.source = InstructionSource::None;
+      }
+      Ok(())
+    }),
+    _ => Ok(()),
+  }
 }
 
 /// A new id for a copy of the custom agent `id`.
