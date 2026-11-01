@@ -1,6 +1,7 @@
 import { writable } from "svelte/store";
 import { open as openExternal } from "@tauri-apps/plugin-shell";
 import {
+  deleteAccount,
   getAccountStatus,
   onAccountChanged,
   signOutAccount,
@@ -18,6 +19,7 @@ interface AccountState {
   /** The provider whose browser sign-in waits for its callback. */
   signingIn: AccountProvider | null;
   signingOut: boolean;
+  deleting: boolean;
   error: string;
 }
 
@@ -29,6 +31,7 @@ export function createAccount(
     status: getAccountStatus,
     start: startAccountSignIn,
     signOut: signOutAccount,
+    deleteAccount,
     openUrl: (url: string) => openExternal(url),
     listen: onAccountChanged,
   },
@@ -39,6 +42,7 @@ export function createAccount(
     loaded: false,
     signingIn: null,
     signingOut: false,
+    deleting: false,
     error: "",
   });
   const patch = (value: Partial<AccountState>) =>
@@ -87,9 +91,28 @@ export function createAccount(
         patch({ signingOut: false });
       }
     },
+    /**
+     * Deletes the account. Returns `true` when it is deleted. On a failure the account stays
+     * and the error shows; an ended session shows signed out.
+     */
+    async deleteAccount() {
+      patch({ error: "", deleting: true });
+      try {
+        const { status, error } = await api.deleteAccount();
+        patch({ identity: status.identity, error: error ?? "" });
+        if (error) return false;
+        onSignedOut();
+        return true;
+      } catch (error) {
+        patch({ error: message(error) });
+        return false;
+      } finally {
+        patch({ deleting: false });
+      }
+    },
   };
 }
 
-/** Sign-out clears the favorites of this device, so the list reloads. */
+/** Sign-out and account deletion clear the favorites of this device, so the list reloads. */
 export const account = createAccount(undefined, () => void favorites.load());
 export const accountState = account.state;
