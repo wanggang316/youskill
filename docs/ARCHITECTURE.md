@@ -161,8 +161,8 @@ holds `library.json` (per skill and instruction: name, source without update-che
 hash, timestamps and `scope`), `agents.json` (custom agents, each with `scope`),
 `skills/<id>/<name>/`, `instructions/<id>.md` and one device file per computer,
 `devices/<device-id>.json` (device name, user-level installs by agent id as item kind and
-id, time of the last backup). `scope` is `"shared"` or `{ "device": "<device-id>" }`; every
-item is shared for now. No absolute path is written. The lock files stay the source of
+id, time of the last backup). `scope` is `"shared"` or `{ "device": "<device-id>" }`; a new
+item is shared. No absolute path is written. The lock files stay the source of
 truth: a backup exports a snapshot and commits it on top of the branch, a restore merges the
 branch, or an earlier commit, back into the hub and lock files.
 
@@ -174,7 +174,7 @@ tree, with the device-only items and device files of other devices copied from t
 
 `.sync-state.json` records the device id, the last synced commit (the base), its files,
 `library.json`, custom agents and this device's file, the user-level agents installed here
-at that point, the deferred items and the incoming items. A snapshot's device file is the
+at that point, the deferred items, the incoming items and the scope changes made here. A snapshot's device file is the
 base device file plus this computer's install changes since the base (without a device file
 at the base, the local installs). `backup` commits on top of the base when the head is the
 base. When another device moved the head, it compares each item of this device in base,
@@ -253,6 +253,29 @@ uninstalls and copy updates; installs in other device files never show. It is us
 and fills after a restore of a commit with another device file of this device.
 `apply_pending` runs the selected ones through the normal install actions without force.
 Project installs are not synced.
+
+Item scope and devices (ADR 0004, "Edits and scope changes" and "Devices"):
+
+- `set_item_scope(key, shared | device)` changes the scope of a local item and keeps it in
+  the sync state until a backup writes it; the files do not move. A device can only change
+  the items it gets, so it never changes a device-only item of another device. On other
+  devices the next plan shows an item that became device-only as a `removal_candidate` with
+  `madeDeviceOnly` (removed by default). A local item that stays after a restore (kept,
+  `keep_local`, or written from an earlier commit) whose id is a device-only item of another
+  device at the head moves to a new id as a device-only item of this device; installs follow
+  it, and a custom agent's id changes in the install records too.
+- `copy_device_item(key)` copies a device-only item of another device from the head as a
+  device-only item of this device with a new id.
+- `devices` lists the device files, the owners of device-only items and this computer.
+  `rename_device` changes the name the next backup writes into the device file.
+- On the first connect only (no base): `take_over_device(id)` sets the device id, so the
+  following restore brings that device's device-only items and its device file as the base
+  (its installs are pending); `copy_device_installs(from)` sets the base device file to the
+  installs of `from` (default: the latest backup) for the agents of this computer, without
+  changing the source file.
+- `remove_device(id, choices)` writes one commit: each device-only item of the device
+  becomes shared, goes to another device or is deleted, then its device file is deleted.
+  This computer cannot remove itself.
 
 ## Favorites (`favorites_service`, `favorite_sync_service`)
 
