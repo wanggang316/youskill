@@ -22,7 +22,7 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.connectedRestoreHint":
       "The repository already holds a library. Restore it on this computer.",
     "settings.sync.scopeHint":
-      "Synced: skills, instruction templates, which agents each one is enabled for at user level, and custom agents. Install paths, projects, settings and keys stay on this computer.",
+      "Synced: skills, instruction templates and custom agents. Each computer keeps its own user-level installs in its own device file, so an install here does not appear on other computers. Install paths, projects, settings and keys stay on this computer.",
     "settings.sync.openOnGithub": "Open on GitHub",
     "settings.sync.disconnect": "Disconnect",
     "settings.sync.confirmDisconnect": "Disconnect",
@@ -49,19 +49,29 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.localChangesTitle": "Changes on this computer",
     "settings.sync.localChangesHint":
       "These changes are not on GitHub yet. Back up to send them. If GitHub also has new changes, restore first: the restore keeps these changes and backs them up with the result.",
-    "settings.sync.customAgents": "Custom agents",
+    "settings.sync.customAgent": "Custom agent {name}",
+    "settings.sync.deviceInstalls": "Installs on this computer",
     "settings.sync.change.added": "Added",
     "settings.sync.change.modified": "Changed",
     "settings.sync.change.removed": "Removed",
     "settings.sync.skipped": "Not backed up (a file over 50 MB or a missing library copy): {names}",
     "settings.sync.backupPushed": "Backed up {count} changes.",
+    "settings.sync.backupPushedIncoming":
+      "Backed up {count} changes. {incoming} changes from other computers are kept for the next restore.",
     "settings.sync.backupUpToDate": "Nothing to back up.",
     "settings.sync.backupRemoteAhead":
       "Another computer backed up since your last sync. Restore first, then back up.",
     "settings.sync.backupRemoteNotEmpty":
       "The repository already holds a library from another computer. Choose how to combine it with this one.",
     "settings.sync.diverged":
-      "This computer and the repository both changed since the last sync. Restore to merge them.",
+      "An item changed on this computer and in the repository since the last sync. Restore to decide which version to keep.",
+    "settings.sync.migrateTitle": "Update the repository format?",
+    "settings.sync.migrateHint":
+      "The repository uses the format of an older YouSkill. The update keeps all items as shared items and moves the installs of this computer into its own device file, in one commit.",
+    "settings.sync.migrateWarning":
+      "Other computers must update YouSkill before they can back up or restore again.",
+    "settings.sync.confirmMigrate": "Update repository",
+    "settings.sync.migrated": "The repository uses the new format.",
     "settings.sync.pullUpToDate": "Already up to date.",
     "settings.sync.pendingTitle": "To do on this computer",
     "settings.sync.pendingSummary": "{count} install changes for the agents on this computer",
@@ -738,7 +748,7 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.connected": "已连接。点「备份」保存这台电脑的中心库。",
     "settings.sync.connectedRestoreHint": "仓库里已有备份。点「恢复」在这台电脑上恢复。",
     "settings.sync.scopeHint":
-      "会同步：skill、指令模板、每项在用户级启用了哪些 Agent，以及自定义 Agent。安装路径、项目、设置和密钥只留在这台电脑上。",
+      "会同步：skill、指令模板和自定义 Agent。每台电脑在自己的设备文件中保存自己的用户级安装，这台电脑的安装不会出现在其他电脑上。安装路径、项目、设置和密钥只留在这台电脑上。",
     "settings.sync.openOnGithub": "在 GitHub 打开",
     "settings.sync.disconnect": "断开",
     "settings.sync.confirmDisconnect": "断开",
@@ -763,17 +773,27 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.localChangesTitle": "这台电脑的改动",
     "settings.sync.localChangesHint":
       "这些改动还没有备份到 GitHub，点「备份」上传。如果 GitHub 上也有新改动，需要先恢复：恢复会保留这些改动，并与结果一起备份。",
-    "settings.sync.customAgents": "自定义 Agent",
+    "settings.sync.customAgent": "自定义 Agent {name}",
+    "settings.sync.deviceInstalls": "这台电脑的安装",
     "settings.sync.change.added": "新增",
     "settings.sync.change.modified": "修改",
     "settings.sync.change.removed": "删除",
     "settings.sync.skipped": "未备份（单个文件超过 50 MB 或中心库副本缺失）：{names}",
     "settings.sync.backupPushed": "已备份 {count} 项改动。",
+    "settings.sync.backupPushedIncoming":
+      "已备份 {count} 项改动。其他电脑的 {incoming} 项改动已保留，下次恢复时可以取回。",
     "settings.sync.backupUpToDate": "没有需要备份的改动。",
     "settings.sync.backupRemoteAhead": "上次同步后其他电脑有新的备份。请先恢复，再备份。",
     "settings.sync.backupRemoteNotEmpty":
       "该仓库已有其他电脑的中心库，请选择如何与这台电脑的中心库合并。",
-    "settings.sync.diverged": "上次同步后，这台电脑和仓库都有改动。点「恢复」合并两边。",
+    "settings.sync.diverged":
+      "上次同步后，有条目在这台电脑和仓库中都被修改。点「恢复」选择保留哪个版本。",
+    "settings.sync.migrateTitle": "更新仓库格式？",
+    "settings.sync.migrateHint":
+      "该仓库使用旧版 YouSkill 的格式。更新后所有条目保持为共享条目，这台电脑的安装记录移到它自己的设备文件中，只产生一次提交。",
+    "settings.sync.migrateWarning": "其他电脑需要先更新 YouSkill，才能再次备份或恢复。",
+    "settings.sync.confirmMigrate": "更新仓库",
+    "settings.sync.migrated": "仓库已使用新格式。",
     "settings.sync.pullUpToDate": "已是最新。",
     "settings.sync.pendingTitle": "这台电脑待处理",
     "settings.sync.pendingSummary": "本机 Agent 有 {count} 项安装变化",
