@@ -158,11 +158,14 @@ The library is backed up to a private GitHub repository through the GitHub REST 
 Data API, no local clone), with the token of the account selected in Settings > GitHub
 (`gh`). The repository (layout version 2, [ADR 0004](decisions/0004-library-sync-item-scope.md))
 holds `library.json` (per skill and instruction: name, source without update-check fields,
-hash, timestamps and `scope`), `agents.json` (custom agents, each with `scope`),
+hash, timestamps and `scope`; a local source, skill `folder` / `zip` and instruction `file` /
+`agent`, keeps its kind with an empty `path`), `agents.json` (custom agents, each with `scope`),
 `skills/<id>/<name>/`, `instructions/<id>.md` and one device file per computer,
 `devices/<device-id>.json` (device name, user-level installs by agent id as item kind and
 id, time of the last backup). `scope` is `"shared"` or `{ "device": "<device-id>" }`; every
-item is shared for now. No absolute path is written. The lock files stay the source of
+item is shared for now. No absolute path is written. A restore keeps the local path of an
+item whose local source has the same kind; a new item gets the kind without a path. A
+`library.json` written with paths is read, and the next backup writes it without them. The lock files stay the source of
 truth: a backup exports a snapshot and commits it on top of the branch, a restore merges the
 branch, or an earlier commit, back into the hub and lock files.
 
@@ -210,8 +213,8 @@ item unchanged here is a `removal_candidate`. Modes: `pull`; on a first connect 
 both sides have a library, `pull` returns `choose_mode`) `merge`, `replace_local` (local is
 the base, so the repository wins) and `replace_remote` (the repository is the base, so
 local wins). `merge` and `replace_local` first pair local items with repository items of
-another id: equal files is the same item, an equal GitHub or folder source key with other
-files is a conflict ([ADR 0003](decisions/0003-library-sync-id-on-first-merge.md)); custom
+another id: equal files is the same item, an equal GitHub source key with other files is
+a conflict (a folder path is local to one computer and does not pair items) ([ADR 0003](decisions/0003-library-sync-id-on-first-merge.md)); custom
 agents pair only by id. `replace_remote` replaces the shared items and keeps the parts of
 other devices. The
 plan carries the head and a fingerprint of the local snapshot.

@@ -119,7 +119,7 @@ fn fingerprint(env: &Env, path: &Path) -> Option<String> {
   if path == env.lock_path {
     let mut lock = store(env).read().ok()?;
     for record in lock.skills.values_mut() {
-      record.source = shared_source(&record.source);
+      record.source = without_check_fields(&record.source);
     }
     return serde_json::to_vec(&lock.skills)
       .ok()

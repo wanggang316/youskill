@@ -2371,3 +2371,204 @@ fn a_restore_before_this_device_joined_keeps_its_installs() {
     BackupResult::UpToDate
   );
 }
+
+fn set_instruction_source(env: &Env, id: &str, source: InstructionSource) {
+  instruction_service::update_lock(env, |lock| {
+    lock.instructions.get_mut(id).unwrap().source = source;
+    Ok(())
+  })
+  .unwrap();
+}
+
+fn skill_source(env: &Env, id: &str) -> SkillSource {
+  store(env).read().unwrap().skills[id].source.clone()
+}
+
+fn instruction_source(env: &Env, id: &str) -> InstructionSource {
+  instruction_service::read_lock(env).unwrap().instructions[id]
+    .source
+    .clone()
+}
+
+fn folder(path: &str) -> SkillSource {
+  SkillSource::Folder {
+    path: path.to_string(),
+  }
+}
+
+fn file_source(path: &str) -> InstructionSource {
+  InstructionSource::File {
+    path: path.to_string(),
+  }
+}
+
+#[test]
+fn local_source_paths_stay_on_this_computer() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  let home = a.home.to_string_lossy().to_string();
+  add_skill(&a, FOO, "foo", "v1");
+  set_source(&a, FOO, folder(&format!("{}/skills/foo", home)));
+  add_skill(&a, BAR, "bar", "v1");
+  set_source(
+    &a,
+    BAR,
+    SkillSource::Zip {
+      path: format!("{}/bar.zip", home),
+    },
+  );
+  add_instruction(&a, NOTE, "# rules\n");
+  set_instruction_source(
+    &a,
+    NOTE,
+    InstructionSource::Agent {
+      path: format!("{}/.claude/CLAUDE.md", home),
+    },
+  );
+  backup_with(&a, &repo).unwrap();
+
+  for path in [LIBRARY_FILE, README_FILE] {
+    let text = String::from_utf8(repo.head_file(path).unwrap()).unwrap();
+    assert!(!text.contains(&home), "{}: {}", path, text);
+  }
+  let readme = String::from_utf8(repo.head_file(README_FILE).unwrap()).unwrap();
+  assert!(readme.contains("| foo | folder |"), "{}", readme);
+  assert!(readme.contains("| bar | zip |"), "{}", readme);
+  // The source kind stays.
+  let library = library_at_head(&repo);
+  assert_eq!(library.skills[FOO].source, folder(""));
+  assert_eq!(
+    library.skills[BAR].source,
+    SkillSource::Zip {
+      path: String::new()
+    }
+  );
+  assert_eq!(
+    library.instructions[NOTE].source,
+    InstructionSource::Agent {
+      path: String::new()
+    }
+  );
+  // The local lock keeps the paths and nothing is left to back up.
+  assert_eq!(
+    skill_source(&a, FOO),
+    folder(&format!("{}/skills/foo", home))
+  );
+  assert!(status(&a).unwrap().changes.is_empty());
+}
+
+#[test]
+fn a_restore_keeps_the_local_source_path() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    set_source(a, FOO, folder("/a/foo"));
+    add_instruction(a, NOTE, "# v1\n");
+    set_instruction_source(a, NOTE, file_source("/a/rules.md"));
+  });
+  // B got the source kinds without the path of A.
+  assert_eq!(skill_source(&b, FOO), folder(""));
+  assert_eq!(instruction_source(&b, NOTE), file_source(""));
+
+  // B has the same items from its own folders.
+  set_source(&b, FOO, folder("/b/foo"));
+  set_instruction_source(&b, NOTE, file_source("/b/rules.md"));
+  assert!(status(&b).unwrap().changes.is_empty());
+
+  edit_skill(&a, FOO, "foo", "v2");
+  fs::write(a.instruction_file(NOTE), "# v2\n").unwrap();
+  instruction_service::update_lock(&a, |lock| {
+    lock.instructions.get_mut(NOTE).unwrap().hash =
+      crate::utils::hash::hash_file(&a.instruction_file(NOTE)).unwrap();
+    Ok(())
+  })
+  .unwrap();
+  assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
+
+  pull(&b, &repo);
+  assert!(skill_body(&b, FOO, "foo").contains("v2"));
+  assert_eq!(skill_source(&b, FOO), folder("/b/foo"));
+  assert_eq!(instruction_source(&b, NOTE), file_source("/b/rules.md"));
+  // The sources do not change on each sync.
+  assert!(status(&b).unwrap().changes.is_empty());
+  assert_eq!(
+    backup_with(&b, &repo).unwrap().result,
+    BackupResult::UpToDate
+  );
+  pull(&a, &repo);
+  assert_eq!(skill_source(&a, FOO), folder("/a/foo"));
+  assert_eq!(instruction_source(&a, NOTE), file_source("/a/rules.md"));
+}
+
+#[test]
+fn a_first_merge_does_not_pair_equal_folder_paths() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "from a");
+  set_source(&a, FOO, folder("/Users/me/skills/foo"));
+  backup_with(&a, &repo).unwrap();
+
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  add_skill(&b, BAR, "foo", "from b");
+  set_source(&b, BAR, folder("/Users/me/skills/foo"));
+  let planned = plan(&b, &repo, RestoreMode::Merge);
+  let foo = item(&planned, &skill_key(FOO));
+  assert_eq!(
+    (foo.local_id.as_deref(), foo.resolution),
+    (None, Resolution::TakeRemote)
+  );
+  assert_eq!(
+    item(&planned, &skill_key(BAR)).resolution,
+    Resolution::KeepLocal
+  );
+}
+
+#[test]
+fn source_paths_in_an_existing_repository_go_on_the_next_backup() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, _) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    set_source(a, FOO, folder("/a/foo"));
+    add_instruction(a, NOTE, "# rules\n");
+    set_instruction_source(a, NOTE, file_source("/a/rules.md"));
+  });
+  // An earlier version wrote the paths of another computer.
+  let mut library = library_at_head(&repo);
+  library.skills.get_mut(FOO).unwrap().source = folder("/old/foo");
+  library.instructions.get_mut(NOTE).unwrap().source = file_source("/old/rules.md");
+  let mut theirs = library.skills[FOO].clone();
+  theirs.name = "theirs".to_string();
+  theirs.scope = Scope::Device(OTHER_DEVICE.to_string());
+  library.skills.insert(OTHER_SKILL.to_string(), theirs);
+  commit_files(
+    &repo,
+    repo.files_at(&repo.head_commit(), ""),
+    &[
+      (LIBRARY_FILE, pretty_json(&library).unwrap()),
+      (
+        &format!("skills/{}/theirs/SKILL.md", OTHER_SKILL),
+        b"theirs".to_vec(),
+      ),
+    ],
+    "Backup from an old app",
+  );
+
+  // A new computer reads the library and gets no path of another computer.
+  let c = computer(tmp.path(), "c", &["claude-code"]);
+  assert_eq!(pull(&c, &repo).result, RestoreResult::Applied);
+  assert_eq!(skill_source(&c, FOO), folder(""));
+  assert_eq!(instruction_source(&c, NOTE), file_source(""));
+
+  // A keeps its own paths, and its next backup removes the paths from the repository.
+  pull(&a, &repo);
+  assert_eq!(skill_source(&a, FOO), folder("/a/foo"));
+  assert_eq!(instruction_source(&a, NOTE), file_source("/a/rules.md"));
+  backup_with(&a, &repo).unwrap();
+  let text = String::from_utf8(repo.head_file(LIBRARY_FILE).unwrap()).unwrap();
+  assert!(!text.contains("/old/"), "{}", text);
+  assert_eq!(library_at_head(&repo).skills[OTHER_SKILL].name, "theirs");
+}
