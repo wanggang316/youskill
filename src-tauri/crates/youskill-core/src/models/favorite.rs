@@ -43,6 +43,9 @@ pub struct FavoriteStore {
   /// Server change sequence of the last pull.
   pub cursor: Option<String>,
   pub favorites: Vec<LocalFavorite>,
+  /// The first sync with `account_id` has not finished. Until it does, local favorites win
+  /// over account removals, so they merge into the account as a union.
+  pub merging: bool,
 }
 
 impl FavoriteStore {
@@ -147,6 +150,18 @@ impl FavoriteStore {
     }
   }
 
+  /// Makes a pushed local record later than `server`, the newer account record, so the next
+  /// push wins. It stays pending.
+  pub fn outdate(&mut self, skill_id: &str, server: &FavoriteRecord) -> Option<FavoriteRecord> {
+    let item = self
+      .favorites
+      .iter_mut()
+      .find(|item| item.record.skill_id == skill_id)?;
+    item.record.updated_at = item.record.updated_at.max(server.updated_at + 1);
+    item.pending = true;
+    Some(item.record.clone())
+  }
+
   /// Reverts a pushed add that the server rejected. A newer local change stays.
   pub fn revert(&mut self, rejected: &FavoriteRecord) {
     self.favorites.retain(|item| {
@@ -163,6 +178,7 @@ impl FavoriteStore {
     }
     self.account_id = Some(account_id.to_string());
     self.cursor = None;
+    self.merging = true;
     for item in &mut self.favorites {
       item.pending = true;
     }
