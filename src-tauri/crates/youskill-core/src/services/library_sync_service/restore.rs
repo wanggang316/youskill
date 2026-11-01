@@ -313,7 +313,7 @@ pub(super) fn resolve(
 /// Pair local and repository items of the same kind that have different ids: equal content
 /// first, then equal source key. Paired local items move to the repository key. Custom
 /// agents pair only by id.
-fn pair_items(
+pub(super) fn pair_items(
   local: &mut BTreeMap<String, ItemVersion>,
   remote: &BTreeMap<String, ItemVersion>,
 ) -> BTreeMap<String, (String, MatchReason)> {
@@ -742,17 +742,30 @@ pub fn apply_restore_with(
     ));
   }
 
-  // The base becomes the target. Its device file for this device (when it has one) is
-  // the base of the installs here, so the pending list shows what it changes.
+  // The base becomes the target. Its device file for this device is the base of the
+  // installs here, so the pending list shows what it changes.
   let mut next = state.clone();
+  match &planned.target_state.device {
+    Some(device) => next.base_device = Some(device.clone()),
+    // An earlier version 2 commit from before this device joined: no installs there. The
+    // head without the file (no backup yet) and a version 1 commit (no device files at
+    // all) keep the installs as they are.
+    None
+      if target_commit != head.commit
+        && planned.target_state.library.version >= LIBRARY_VERSION =>
+    {
+      next.base_device = Some(DeviceFile {
+        name: state.device_label(),
+        ..DeviceFile::default()
+      });
+    },
+    None => {},
+  }
   next.last_synced_commit = Some(target_commit.clone());
   next.last_pull_at = Some(now_rfc3339());
   next.base_files = planned.target_state.files.clone();
   next.base_library = Some(planned.target_state.library.clone());
   next.base_agents = Some(planned.target_state.agents.clone());
-  if planned.target_state.device.is_some() {
-    next.base_device = planned.target_state.device.clone();
-  }
   next.deferred = actions.deferred.clone();
   next.incoming.clear();
   write_state(env, &next)?;

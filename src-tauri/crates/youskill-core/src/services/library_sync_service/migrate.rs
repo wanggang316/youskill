@@ -51,19 +51,38 @@ pub fn migrate_with(env: &Env, remote: &dyn RemoteRepo) -> Result<(), String> {
     })
     .collect();
 
-  // Installs of the repository's items on this computer.
-  let mut local_agents = BTreeMap::new();
-  for (id, record) in &store(env).read()?.skills {
-    let agents = user_agents(&record.installs);
-    if library.skills.contains_key(id) && !agents.is_empty() {
-      local_agents.insert(skill_key(id), agents);
+  // Installs of the repository's items on this computer. On a first connect the merge
+  // that follows pairs local items with repository items of another id (ADR 0003); the
+  // installs follow the same pairing.
+  let mut paired: BTreeMap<String, String> = BTreeMap::new();
+  if state.last_synced_commit.is_none() {
+    let mut local = local_snapshot(env, &state, &device)?.items();
+    for (remote_key, (local_key, _)) in restore::pair_items(&mut local, &current.items(&device)) {
+      paired.insert(local_key, remote_key);
     }
   }
+  let mut local_installs: Vec<(String, Vec<String>)> = Vec::new();
+  for (id, record) in &store(env).read()?.skills {
+    local_installs.push((skill_key(id), user_agents(&record.installs)));
+  }
   for (id, record) in &instruction_service::read_lock(env)?.instructions {
-    let agents = user_agents(&record.installs);
-    if library.instructions.contains_key(id) && !agents.is_empty() {
-      local_agents.insert(instruction_key(id), agents);
+    local_installs.push((instruction_key(id), user_agents(&record.installs)));
+  }
+  let mut local_agents: BTreeMap<String, Vec<String>> = BTreeMap::new();
+  for (key, agents) in local_installs {
+    let key = paired.get(&key).cloned().unwrap_or(key);
+    let in_library = match split_key(&key) {
+      Some((ItemKind::Skill, id)) => library.skills.contains_key(id),
+      Some((ItemKind::Instruction, id)) => library.instructions.contains_key(id),
+      _ => false,
+    };
+    if in_library && !agents.is_empty() {
+      local_agents.entry(key).or_default().extend(agents);
     }
+  }
+  for agents in local_agents.values_mut() {
+    agents.sort();
+    agents.dedup();
   }
   let device_file = DeviceFile {
     name: state.device_label(),

@@ -2264,3 +2264,49 @@ fn a_sync_state_of_version_1_is_read() {
   assert_eq!(library.version, 1);
   assert_eq!(library.skills[FOO].scope, Scope::Shared);
 }
+
+#[test]
+fn first_connect_migration_maps_the_installs_of_paired_items() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  backup_with(&a, &repo).unwrap();
+  downgrade_head(&repo, &[(FOO, &["claude-code"])]);
+
+  // B has the same skill under another id, installed for claude-code.
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  add_skill(&b, BAR, "foo", "v1");
+  install(&b, BAR, &["claude-code"]);
+  migrate_with(&b, &repo).unwrap();
+  assert_eq!(
+    device_file(&repo, &b).by_item(),
+    BTreeMap::from([(skill_key(FOO), vec!["claude-code".to_string()])])
+  );
+}
+
+#[test]
+fn a_restore_before_this_device_joined_offers_to_remove_its_installs() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  let before = backup_with(&a, &repo).unwrap().commit.unwrap();
+
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  pull(&b, &repo);
+  install(&b, FOO, &["claude-code"]);
+  assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
+
+  let planned = plan_restore_with(&b, &repo, RestoreMode::Pull, Some(&before)).unwrap();
+  apply(&b, &repo, &planned, RestoreDecisions::default());
+  assert_eq!(
+    pending(&b)
+      .unwrap()
+      .iter()
+      .map(|item| (item.action, item.agent_id.as_str()))
+      .collect::<Vec<_>>(),
+    vec![(PendingAction::Uninstall, "claude-code")]
+  );
+  assert!(device_file(&repo, &b).installs.is_empty());
+}
