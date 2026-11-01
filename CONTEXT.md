@@ -116,3 +116,9 @@ _Avoid_: Bookmark, collection, star
 A favorite stored only on this device. It needs no account and merges into the account at
 sign-in.
 _Avoid_: Guest favorite
+
+**Account**:
+A youskill server account that a person signs in to with GitHub or Apple. A GitHub and an
+Apple sign-in are two accounts. Sign-out removes the favorites of this device; a session the
+server revoked keeps them. See `youskill-web/docs/decisions/0003-client-sign-in-sessions.md`.
+_Avoid_: Profile, user
