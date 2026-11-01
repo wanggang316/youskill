@@ -99,17 +99,22 @@ pub async fn sync(
   Ok(report)
 }
 
-/// Pushes the pending changes in batches. During the first sync with an account, a local
-/// favorite that a newer account removal beats is pushed once more with a later time, so it
-/// stays.
+/// Pushes the pending changes in batches, removals first, so a removal frees its place
+/// before an add needs it. During the first sync with an account, local favorites merge as a
+/// union: local removals are dropped and not pushed, and a local favorite that a newer
+/// account removal beats is pushed once more with a later time, so it stays.
 async fn push(
   store: &mut FavoriteStore,
   server: &impl FavoriteServer,
   report: &mut SyncReport,
 ) -> Result<(), SyncError> {
   let mut merging = store.merging;
+  if merging {
+    store.drop_removals();
+  }
   let mut changes = store.pending();
   while !changes.is_empty() {
+    changes.sort_by_key(|change| change.favorited);
     let mut again = Vec::new();
     for batch in changes.chunks(PUSH_LIMIT) {
       for result in server.push(batch).await? {
@@ -528,6 +533,7 @@ mod tests {
     let server = FakeServer::new();
     server.with(|state| state.page_size = 2_000);
     let mut store = signed_in();
+    run(&mut store, &server).unwrap();
     for id in 0..PUSH_LIMIT + 1 {
       add(&mut store, &id.to_string(), 10);
     }
@@ -578,6 +584,41 @@ mod tests {
     );
     assert_eq!(store.find("1").unwrap().record, record("1", true, 5));
     assert!(store.pending().is_empty());
+  }
+
+  #[test]
+  fn first_sign_in_does_not_push_a_local_removal_over_an_account_favorite() {
+    let server = FakeServer::new();
+    server.write(record("42", true, 5));
+    let mut store = FavoriteStore::default();
+    add(&mut store, "42", 10);
+    store.set("42", false, None, 20).unwrap();
+
+    store.begin_account("account-1");
+    run(&mut store, &server).unwrap();
+
+    assert_eq!(server.get("42"), Some(record("42", true, 5)));
+    assert!(server.with(|state| state.pushes.is_empty()));
+    assert_eq!(ids(&store), ["42"]);
+  }
+
+  #[test]
+  fn removals_push_before_adds() {
+    let server = FakeServer::new();
+    let mut store = signed_in();
+    run(&mut store, &server).unwrap();
+    add(&mut store, "x", 10);
+    for id in 0..PUSH_LIMIT {
+      add(&mut store, &id.to_string(), 10);
+      store.set(&id.to_string(), false, None, 20).unwrap();
+    }
+
+    run(&mut store, &server).unwrap();
+
+    let pushes = server.with(|state| state.pushes.clone());
+    assert_eq!(pushes.len(), 2);
+    assert!(pushes[0].iter().all(|change| !change.favorited));
+    assert_eq!(pushes[1], [store.find("x").unwrap().record.clone()]);
   }
 
   #[test]

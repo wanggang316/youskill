@@ -169,6 +169,12 @@ impl FavoriteStore {
     });
   }
 
+  /// Drops all removals. Used before the first sync with an account: a removal made without
+  /// that account must not remove a favorite of the account.
+  pub fn drop_removals(&mut self) {
+    self.favorites.retain(|item| item.record.favorited);
+  }
+
   /// Takes the records of `current` that changed after `start`: local changes made while a
   /// sync of `start` ran. They are newer than the sync result and stay pending.
   pub fn keep_local_changes(&mut self, start: &FavoriteStore, current: &FavoriteStore) {
