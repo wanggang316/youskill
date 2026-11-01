@@ -124,8 +124,14 @@ fn handle_link(app: &AppHandle, link: String) {
     let outcome = app.state::<Account>().complete_sign_in(&link).await;
     let error = match outcome {
       Ok(CallbackOutcome::Ignored) => return,
-      Ok(CallbackOutcome::SignedIn(_) | CallbackOutcome::Cancelled) => None,
-      Err(error) => Some(error),
+      Ok(outcome) => {
+        tracing::info!("Sign-in callback: {outcome:?}");
+        None
+      },
+      Err(error) => {
+        tracing::warn!("Sign-in callback failed: {error}");
+        Some(error)
+      },
     };
     app.state::<LastError>().set(error.clone());
     if let Some(window) = app.get_webview_window("main") {
