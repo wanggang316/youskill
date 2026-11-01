@@ -6,7 +6,8 @@
 
 import { apiCall } from "./index";
 
-export type SyncItemKind = "skill" | "instruction" | "agents";
+/** `agent` is a custom agent; `device` is this computer's installs. */
+export type SyncItemKind = "skill" | "instruction" | "agent" | "device";
 export type SyncChangeKind = "added" | "modified" | "removed";
 
 export interface LibraryChange {
@@ -25,6 +26,8 @@ export interface SyncStatus {
   lastPullAt?: string;
   /** This computer has backed up or pulled at least once. */
   hasSynced: boolean;
+  /** The last sync was with a version 1 repository; the next backup or restore may ask to migrate it. */
+  legacyBase: boolean;
   /** Changes on this computer since the last sync. */
   changes: LibraryChange[];
   /** Skills left out of the backup (a file over 50 MB, a missing hub copy). */
@@ -45,13 +48,16 @@ export type BackupResult =
   | "up_to_date"
   | "remote_ahead"
   | "diverged"
-  | "remote_not_empty";
+  | "remote_not_empty"
+  | "migration_required";
 
 export interface BackupOutcome {
   result: BackupResult;
   commit?: string;
   changes: LibraryChange[];
   skipped: string[];
+  /** Changes of other computers the backup kept for the next restore. */
+  incoming: number;
 }
 
 /** `pull` merges against the last synced commit; the other modes are for a first connect. */
@@ -60,10 +66,15 @@ export type FirstConnectMode = Exclude<RestoreMode, "pull">;
 export type ItemChange = "unchanged" | "added" | "modified" | "removed";
 export type Resolution = "keep_local" | "take_remote" | "conflict" | "removal_candidate";
 export type MatchReason = "hash" | "source_key";
-export type PlanState = "ready" | "up_to_date" | "remote_empty" | "choose_mode";
+export type PlanState =
+  | "ready"
+  | "up_to_date"
+  | "remote_empty"
+  | "choose_mode"
+  | "migration_required";
 
 export interface RestoreItem {
-  /** `skill:<id>`, `instruction:<id>` or `agents`. */
+  /** `skill:<id>`, `instruction:<id>` or `agent:<id>`. */
   key: string;
   kind: SyncItemKind;
   id: string;
@@ -152,6 +163,11 @@ export async function connectLibrarySync(repo: string): Promise<SyncStatus> {
 
 export async function disconnectLibrarySync(): Promise<void> {
   return apiCall<void>("library_sync_disconnect");
+}
+
+/** Move a version 1 repository to item scopes and device files, after confirmation. */
+export async function migrateLibrarySync(): Promise<void> {
+  return apiCall<void>("library_sync_migrate");
 }
 
 export async function backupLibrary(): Promise<BackupOutcome> {

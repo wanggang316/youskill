@@ -93,12 +93,14 @@
   }
 
   function itemName(item: RestoreItem): string {
-    return item.kind === "agents" ? $t("settings.sync.customAgents") : item.name || item.id;
+    return item.kind === "agent"
+      ? $t("settings.sync.customAgent", { name: item.name || item.id })
+      : item.name || item.id;
   }
 
   function canKeepBoth(item: RestoreItem): boolean {
     return (
-      item.kind !== "agents" && item.localChange !== "removed" && item.remoteChange !== "removed"
+      item.kind !== "agent" && item.localChange !== "removed" && item.remoteChange !== "removed"
     );
   }
 

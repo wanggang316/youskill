@@ -12,6 +12,7 @@
     getLibrarySyncStatus,
     listLibraryHistory,
     listLibraryPending,
+    migrateLibrarySync,
     planLibraryRestore,
     undoLibraryRestore,
     type FirstConnectMode,
@@ -52,8 +53,9 @@
     | "apply"
     | "history"
     | "undo"
+    | "migrate"
     | "disconnect";
-  type Dialog = "restore" | "changes" | "pending" | "history" | "undo" | "disconnect";
+  type Dialog = "restore" | "changes" | "pending" | "history" | "undo" | "migrate" | "disconnect";
   type Notice = { tone: "success" | "info" | "error"; text: string };
 
   const DEFAULT_REPO = "youskill-library";
@@ -82,6 +84,8 @@
   let lastRestore = $state<{ mode: RestorePlan["mode"]; target: string | null } | null>(null);
   /** Pending installs that the last apply skipped. */
   let pendingFailures = $state<PendingFailure[]>([]);
+  /** The backup or restore preview to run again after the repository migration. */
+  let afterMigrate: (() => Promise<void>) | null = null;
 
   const githubReady = $derived(Boolean(github?.gh_installed && github?.selected_login));
   const pendingGroups = $derived(
@@ -165,6 +169,7 @@
     run("connect", async () => {
       status = await connectLibrarySync(repoInput);
       await preview("pull");
+      if (dialog === "migrate") return;
       if (plan?.state === "choose_mode") {
         notice = { tone: "info", text: $t("settings.sync.connectedChooseHint") };
       } else if (plan?.state !== "remote_empty" && status.libraryEmpty) {
@@ -184,32 +189,70 @@
       status = await getLibrarySyncStatus();
     });
 
-  const backup = () =>
-    run("backup", async () => {
-      const outcome = await backupLibrary();
-      const count = outcome.changes.length;
-      if (dialog === "changes") dialog = null;
+  /** Ask to migrate a version 1 repository, then run `next` again. */
+  function askMigrate(next: () => Promise<void>) {
+    plan = null;
+    afterMigrate = next;
+    restoreResult = null;
+    notice = null;
+    dialog = "migrate";
+  }
+
+  const migrate = () =>
+    run("migrate", async () => {
+      await migrateLibrarySync();
+      dialog = null;
       status = await getLibrarySyncStatus();
-      if (outcome.result === "pushed") plan = null;
-      else if (outcome.result !== "up_to_date") {
-        await preview(outcome.result === "remote_not_empty" ? "merge" : "pull");
+      notice = { tone: "success", text: $t("settings.sync.migrated") };
+      const next = afterMigrate;
+      afterMigrate = null;
+      if (next) await next();
+      // With nothing more to back up or restore, the migration is the news.
+      if (dialog === null && notice?.tone !== "error" && notice?.tone !== "success") {
+        notice = { tone: "success", text: $t("settings.sync.migrated") };
       }
-      notice =
-        outcome.result === "pushed"
-          ? { tone: "success", text: $t("settings.sync.backupPushed", { count }) }
-          : outcome.result === "up_to_date"
-            ? { tone: "info", text: $t("settings.sync.backupUpToDate") }
-            : outcome.result === "remote_ahead"
-              ? { tone: "info", text: $t("settings.sync.backupRemoteAhead") }
-              : outcome.result === "diverged"
-                ? { tone: "info", text: $t("settings.sync.diverged") }
-                : { tone: "info", text: $t("settings.sync.backupRemoteNotEmpty") };
     });
+
+  const backup = () => run("backup", runBackup);
+
+  async function runBackup() {
+    const outcome = await backupLibrary();
+    const count = outcome.changes.length;
+    if (dialog === "changes") dialog = null;
+    if (outcome.result === "migration_required") {
+      askMigrate(runBackup);
+      return;
+    }
+    status = await getLibrarySyncStatus();
+    if (outcome.result === "pushed") plan = null;
+    else if (outcome.result !== "up_to_date") {
+      await preview(outcome.result === "remote_not_empty" ? "merge" : "pull");
+    }
+    notice =
+      outcome.result === "pushed"
+        ? outcome.incoming > 0
+          ? {
+              tone: "success",
+              text: $t("settings.sync.backupPushedIncoming", { count, incoming: outcome.incoming }),
+            }
+          : { tone: "success", text: $t("settings.sync.backupPushed", { count }) }
+        : outcome.result === "up_to_date"
+          ? { tone: "info", text: $t("settings.sync.backupUpToDate") }
+          : outcome.result === "remote_ahead"
+            ? { tone: "info", text: $t("settings.sync.backupRemoteAhead") }
+            : outcome.result === "diverged"
+              ? { tone: "info", text: $t("settings.sync.diverged") }
+              : { tone: "info", text: $t("settings.sync.backupRemoteNotEmpty") };
+  }
 
   /** Plan a restore and open it, or report that there is nothing to restore. */
   async function preview(mode: RestorePlan["mode"], target: string | null = null) {
     plan = await planLibraryRestore(mode, target);
     restoreResult = null;
+    if (plan.state === "migration_required") {
+      askMigrate(() => preview(mode, target));
+      return;
+    }
     if (plan.state === "ready" || plan.state === "choose_mode") {
       dialog = "restore";
       return;
@@ -344,7 +387,10 @@
   }
 
   function changeName(change: LibraryChange): string {
-    return change.kind === "agents" ? $t("settings.sync.customAgents") : change.name || change.id;
+    if (change.kind === "device") return $t("settings.sync.deviceInstalls");
+    return change.kind === "agent"
+      ? $t("settings.sync.customAgent", { name: change.name || change.id })
+      : change.name || change.id;
   }
 
   function localSummary(current: SyncStatus): string {
@@ -366,6 +412,7 @@
         ? $t("settings.sync.remoteAhead", { count: incoming })
         : $t("settings.sync.remoteUpToDate");
     }
+    if (current.legacyBase) return $t("settings.sync.legacyBase");
     return current.lastPullAt
       ? $t("settings.sync.lastPull", { time: formatTime(current.lastPullAt) })
       : $t("settings.sync.notChecked");
@@ -760,6 +807,32 @@
       loading={busy === "undo"}
     >
       {$t("settings.sync.confirmUndo")}
+    </PrimaryActionButton>
+  {/snippet}
+</Modal>
+
+<Modal
+  open={dialog === "migrate"}
+  title={$t("settings.sync.migrateTitle")}
+  onClose={closeDialog}
+  containerClass="max-w-md"
+>
+  <div class="space-y-3 px-6 pt-4 pb-5 text-[13px]">
+    <p class="text-base-content leading-relaxed">{$t("settings.sync.migrateHint")}</p>
+    <p class="text-warning-content bg-warning/10 rounded-xl px-4 py-3 leading-relaxed">
+      {$t("settings.sync.migrateWarning")}
+    </p>
+    {@render noticeView(true)}
+  </div>
+  {#snippet footer()}
+    {@render cancelButton()}
+    <PrimaryActionButton
+      className="h-8 rounded-lg px-3 py-0 text-[13px]"
+      onclick={migrate}
+      disabled={busy !== null && busy !== "migrate"}
+      loading={busy === "migrate"}
+    >
+      {$t("settings.sync.confirmMigrate")}
     </PrimaryActionButton>
   {/snippet}
 </Modal>

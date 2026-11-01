@@ -14,7 +14,7 @@ Code is the source of truth; when this document and the code disagree, fix the d
   instructions/<id>.md    # instruction templates: one Markdown file per template
   .instruction-lock.json  # registry of template names, hashes and install targets
   .trash/<name>-<stamp>/  # previous hub copy before a replacement (swept after 7 days)
-  .sync-state.json       # library sync: repository, last synced commit and its files (local only)
+  .sync-state.json       # library sync: repository, device id, last synced commit and its files (local only)
   .sync-staging/          # pulled skills assembled before they move into the hub
   .sync-checkpoint/       # copies taken before the last restore, for undo
 
@@ -156,24 +156,53 @@ rest get an id and keep their key as name. Everything lives in `instruction_serv
 
 The library is backed up to a private GitHub repository through the GitHub REST API (Git
 Data API, no local clone), with the token of the account selected in Settings > GitHub
-(`gh`). The repository holds `library.json` (per skill and instruction: name, source
-without update-check fields, hash, timestamps, and `agents`, the user-level agent ids it is
-enabled for), `agents.json` (custom agents), `skills/<id>/<name>/` and
-`instructions/<id>.md`. No absolute path is written. The lock files stay the source of
+(`gh`). The repository (layout version 2, [ADR 0004](decisions/0004-library-sync-item-scope.md))
+holds `library.json` (per skill and instruction: name, source without update-check fields,
+hash, timestamps and `scope`), `agents.json` (custom agents, each with `scope`),
+`skills/<id>/<name>/`, `instructions/<id>.md` and one device file per computer,
+`devices/<device-id>.json` (device name, user-level installs by agent id as item kind and
+id, time of the last backup). `scope` is `"shared"` or `{ "device": "<device-id>" }`; every
+item is shared for now. No absolute path is written. The lock files stay the source of
 truth: a backup exports a snapshot and commits it on top of the branch, a restore merges the
 branch, or an earlier commit, back into the hub and lock files.
 
-`.sync-state.json` records the last synced commit (the base), its files and `library.json`,
-the user-level agents installed at that point, and the deferred items. A snapshot's
-`agents` is the base value plus this computer's install changes since then, so agents this
-computer does not have stay enabled. `backup` only fast-forwards from the base: when the
-repository moved it returns `remote_ahead` or `diverged`, and on a first connect to a
-repository with a library `remote_not_empty`; the user then restores.
+A device id is a random uuid made on the first connect, or on the first sync of a state
+written before version 2, and kept in the sync state. `device_gets` is the one function that
+selects the items of a device: shared items and its own device-only items. Snapshot, plan,
+restore and pending see only those; a backup and the commit of a restore write the full
+tree, with the device-only items and device files of other devices copied from the head.
 
-Restore is two calls. `plan_restore(mode, target)` compares each item (a hub skill by id,
-an instruction template by id, `agents.json`) in three states: base, local snapshot and the
-target commit (branch head, or a commit from `history`). Equality is the library entry
-without `agents` plus the item's files; `agents` always merges per agent. Changed on one
+`.sync-state.json` records the device id, the last synced commit (the base), its files,
+`library.json`, custom agents and this device's file, the user-level agents installed here
+at that point, the deferred items and the incoming items. A snapshot's device file is the
+base device file plus this computer's install changes since the base (without a device file
+at the base, the local installs). `backup` commits on top of the base when the head is the
+base. When another device moved the head, it compares each item of this device in base,
+snapshot and head with the restore rules: without a conflict it commits on top of the head
+and moves the base there. Head-only changes and removals are not written here; they become
+incoming items, which snapshots carry like deferred items (so later backups do not revert
+them) and which the next plan offers compared with their old base, selected by default.
+With a conflict the backup returns `diverged` (`remote_ahead` without local changes) and
+writes nothing; on a first connect to a repository with a library it returns
+`remote_not_empty`; the user then restores.
+
+A repository with a version 1 `library.json` (with `agents`, no scopes or device files) is
+migrated once: `backup` returns `migration_required` and `plan_restore` the plan state
+`migration_required`, the UI asks for confirmation (other computers must update the app),
+and `migrate` writes one commit with version 2, every item shared, no `agents`, and this
+device's file from its local install records (on a first connect, local items with another
+id are paired with repository items as the merge pairs them). After a sync the migration commit
+becomes the base, as after a backup on a moved head: changes another device made since the
+base become incoming items; with an item changed on both sides the base stays. A computer whose base is a version 1 commit
+reads it as version 2 with every item shared and no installs, reads its custom agents from
+the repository, and adds its device file with its next backup. Releases up to 0.10.0 refuse a
+`library.json` above version 1. `status` reports `legacyBase` while the base is a version 1
+commit, so Settings says that the next backup or restore may ask for the migration.
+
+Restore is two calls. `plan_restore(mode, target)` compares each item of this device (a hub
+skill by id, an instruction template by id, a custom agent by id) in three states: base, local snapshot and the
+target commit (branch head, or a commit from `history`). Equality is the library entry plus
+the item's files. Changed on one
 side only takes that side (`keep_local`, `take_remote`); changed on both sides to the same
 files, name and source takes the repository's hash and timestamps; otherwise it is a
 `conflict`. A remote removal of an
@@ -182,7 +211,9 @@ both sides have a library, `pull` returns `choose_mode`) `merge`, `replace_local
 the base, so the repository wins) and `replace_remote` (the repository is the base, so
 local wins). `merge` and `replace_local` first pair local items with repository items of
 another id: equal files is the same item, an equal GitHub or folder source key with other
-files is a conflict ([ADR 0003](decisions/0003-library-sync-id-on-first-merge.md)). The
+files is a conflict ([ADR 0003](decisions/0003-library-sync-id-on-first-merge.md)); custom
+agents pair only by id. `replace_remote` replaces the shared items and keeps the parts of
+other devices. The
 plan carries the head and a fingerprint of the local snapshot.
 
 `apply_restore(plan, decisions, options)` holds the operation lock from the check to the
@@ -195,7 +226,10 @@ directory or template file, lock record, symlink installs), adds the local copy 
 id and its installs get the repository version; the copy loses its source when it is the
 repository item's), writes the staged items (symlink installs follow a renamed hub
 directory) and runs the confirmed removals through the normal hub and instruction removal.
-Only when all of these succeed is the base set to the target; on a failure the base stays
+Only when all of these succeed is the base set to the target, with the target's device file
+of this device as the base device file, so the pending list shows what it changes. A
+target without that file (from before this device joined, a head before its first backup, a
+version 1 commit) keeps the installs as they are; on a failure the base stays
 and the checkpoint undoes what was written. When the result differs from the head (local
 items, kept removals, `keep_local`, a historical target), it is committed on top of the
 head and the branch fast-forwards; a rejected fast-forward returns `stale` with the local
@@ -214,9 +248,11 @@ and does not touch the repository. It refuses when a path changed after the rest
 until every step succeeded, so a failed undo can be retried. One checkpoint is kept; a new
 one replaces it only when the next restore is about to write.
 
-After a restore, `pending` lists user-level installs, uninstalls and copy updates that would
-match the library; `apply_pending` runs the selected ones through the normal install
-actions without force. Project installs are not synced.
+`pending` compares this device file with the local installs and lists user-level installs,
+uninstalls and copy updates; installs in other device files never show. It is usually empty
+and fills after a restore of a commit with another device file of this device.
+`apply_pending` runs the selected ones through the normal install actions without force.
+Project installs are not synced.
 
 ## Favorites (`favorites_service`, `favorite_sync_service`)
 

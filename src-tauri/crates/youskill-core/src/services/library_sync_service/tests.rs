@@ -399,47 +399,30 @@ fn backup_then_restore_on_an_empty_computer() {
   add_skill(&a, FOO, "foo", "v1");
   install(&a, FOO, &["claude-code"]);
   add_instruction(&a, NOTE, "# rules\n");
-  fs::write(
-    a.config_dir.join(USER_AGENT_APPS_FILE),
-    serde_json::to_string(&vec![AgentApp {
-      is_user_custom: true,
-      ..app("my-agent")
-    }])
-    .unwrap(),
-  )
-  .unwrap();
+  write_custom_agents(&a, &[custom_agent("my-agent", "My agent")]);
 
   let backup = backup_with(&a, &repo).unwrap();
   assert_eq!(backup.result, BackupResult::Pushed);
-  assert_eq!(backup.changes.len(), 3, "{:?}", backup.changes);
+  // The skill, the instruction, the custom agent and the device file.
+  assert_eq!(backup.changes.len(), 4, "{:?}", backup.changes);
   assert!(status(&a).unwrap().changes.is_empty());
 
   let b = computer(tmp.path(), "b", &["claude-code", "codex"]);
   assert!(status(&b).unwrap().library_empty);
   let pulled = pull(&b, &repo);
   assert_eq!(pulled.result, RestoreResult::Applied);
-  assert!(!pulled.pushed);
+  assert!(pulled.pushed, "the new device file goes to the repository");
   assert!(pulled.agents_changed);
   assert_eq!(hub_hash(&a, FOO, "foo"), hub_hash(&b, FOO, "foo"));
   assert_eq!(
     fs::read(b.instruction_file(NOTE)).unwrap(),
     b"# rules\n".to_vec()
   );
+  assert_eq!(read_user_agent_apps(&b).unwrap()[0].id, "my-agent");
   assert!(status(&b).unwrap().changes.is_empty());
-
-  let items = pending(&b).unwrap();
-  assert_eq!(
-    items
-      .iter()
-      .map(|item| (item.action, item.id.as_str(), item.agent_id.as_str()))
-      .collect::<Vec<_>>(),
-    vec![(PendingAction::Install, FOO, "claude-code")]
-  );
-  let applied = apply_pending(&b, &items, InstallMode::Copy).unwrap();
-  assert_eq!(applied.applied, 1, "{:?}", applied.failures);
-  assert!(b.home.join(".claude-code/skills/foo/SKILL.md").is_file());
+  // The installs of A stay on A.
   assert!(pending(&b).unwrap().is_empty());
-  assert!(status(&b).unwrap().changes.is_empty());
+  assert!(device_file(&repo, &b).installs.is_empty());
   assert_eq!(
     backup_with(&b, &repo).unwrap().result,
     BackupResult::UpToDate
@@ -453,16 +436,18 @@ fn pending_install_over_other_content_reports_the_item() {
   let a = computer(tmp.path(), "a", &["claude-code"]);
   add_skill(&a, FOO, "foo", "v1");
   install(&a, FOO, &["claude-code"]);
+  let installed = backup_with(&a, &repo).unwrap().commit.unwrap();
+  uninstall(&a, FOO, "claude-code");
   backup_with(&a, &repo).unwrap();
 
-  let b = computer(tmp.path(), "b", &["claude-code"]);
-  let target = b.home.join(".claude-code/skills/foo");
+  let target = a.home.join(".claude-code/skills/foo");
   fs::create_dir_all(&target).unwrap();
   fs::write(target.join("SKILL.md"), "other").unwrap();
-  pull(&b, &repo);
+  let planned = plan_restore_with(&a, &repo, RestoreMode::Pull, Some(&installed)).unwrap();
+  apply(&a, &repo, &planned, RestoreDecisions::default());
 
-  let items = pending(&b).unwrap();
-  let applied = apply_pending(&b, &items, InstallMode::Copy).unwrap();
+  let items = pending(&a).unwrap();
+  let applied = apply_pending(&a, &items, InstallMode::Copy).unwrap();
   assert_eq!(applied.applied, 0);
   assert_eq!(applied.failures.len(), 1, "{:?}", applied.failures);
   assert_eq!(applied.failures[0].kind, ItemKind::Skill);
@@ -472,7 +457,7 @@ fn pending_install_over_other_content_reports_the_item() {
     fs::read_to_string(target.join("SKILL.md")).unwrap(),
     "other"
   );
-  assert_eq!(pending(&b).unwrap(), items);
+  assert_eq!(pending(&a).unwrap(), items);
 }
 
 #[test]
@@ -484,11 +469,27 @@ fn repository_holds_no_paths_of_this_computer() {
   install(&a, FOO, &["claude-code"]);
   backup_with(&a, &repo).unwrap();
 
+  let home = a.home.to_string_lossy().to_string();
   let library = String::from_utf8(repo.head_file(LIBRARY_FILE).unwrap()).unwrap();
-  assert!(!library.contains(&a.home.to_string_lossy().to_string()));
+  assert!(!library.contains(&home));
+  assert!(!library.contains("\"agents\""), "{}", library);
+  assert_eq!(library_at_head(&repo).version, 2);
+  assert_eq!(library_at_head(&repo).skills[FOO].scope, Scope::Shared);
+  let path = device_path(&device_id(&a));
+  let device = String::from_utf8(repo.head_file(&path).unwrap()).unwrap();
+  assert!(!device.contains(&home));
+  let device = device_file(&repo, &a);
+  assert_eq!(device.name, "a");
+  assert!(device.last_backup_at.is_some());
   assert_eq!(
-    library_at_head(&repo).skills[FOO].agents,
-    vec!["claude-code"]
+    device.installs,
+    BTreeMap::from([(
+      "claude-code".to_string(),
+      vec![DeviceInstall {
+        kind: ItemKind::Skill,
+        id: FOO.to_string()
+      }]
+    )])
   );
   assert_eq!(
     repo.head_file(&format!("skills/{}/foo/scripts/run.sh", FOO)),
@@ -627,56 +628,30 @@ fn a_conflict_needs_a_decision() {
 }
 
 #[test]
-fn agents_missing_on_this_computer_stay_enabled() {
+fn installs_stay_on_the_device_that_made_them() {
   let tmp = tempfile::tempdir().unwrap();
   let repo = FakeRepo::initialized();
-  let a = computer(tmp.path(), "a", &["claude-code", "cursor"]);
-  add_skill(&a, FOO, "foo", "v1");
-  install(&a, FOO, &["claude-code", "cursor"]);
-  backup_with(&a, &repo).unwrap();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
 
-  // B has no Cursor. It installs for Claude Code and backs up another change.
-  let b = computer(tmp.path(), "b", &["claude-code"]);
-  pull(&b, &repo);
-  let items = pending(&b).unwrap();
-  assert_eq!(items.len(), 1);
-  apply_pending(&b, &items, InstallMode::Copy).unwrap();
-  add_skill(&b, BAR, "bar", "v1");
-  assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
+  install(&a, FOO, &["claude-code"]);
+  assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
   assert_eq!(
-    library_at_head(&repo).skills[FOO].agents,
-    vec!["claude-code", "cursor"]
+    device_file(&repo, &a).by_item()[&skill_key(FOO)],
+    vec!["claude-code"]
   );
 
-  // Uninstalling here disables the agent in the library.
-  install_service::uninstall_skill(
-    &b,
-    UninstallRequest {
-      name: FOO.to_string(),
-      targets: vec![InstallTargetSpec {
-        scope: InstallScope::User,
-        project_path: None,
-        agent_id: "claude-code".to_string(),
-      }],
-      paths: Vec::new(),
-      force: false,
-    },
-  )
-  .unwrap();
-  assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
-  assert_eq!(library_at_head(&repo).skills[FOO].agents, vec!["cursor"]);
+  // B restores: the install of A is not pending here.
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  assert!(planned.items.is_empty(), "{:?}", planned.items);
+  apply(&b, &repo, &planned, RestoreDecisions::default());
+  assert!(pending(&b).unwrap().is_empty());
+  assert!(device_file(&repo, &b).installs.is_empty());
 
-  // A pulls: Claude Code is no longer enabled there.
-  let pulled = pull(&a, &repo);
-  assert!(!pulled.pushed);
-  let items = pending(&a).unwrap();
-  assert_eq!(
-    items
-      .iter()
-      .map(|item| (item.action, item.agent_id.as_str()))
-      .collect::<Vec<_>>(),
-    vec![(PendingAction::Uninstall, "claude-code")]
-  );
+  // An uninstall on A changes only the device file of A.
+  uninstall(&a, FOO, "claude-code");
+  assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
+  assert!(device_file(&repo, &a).installs.is_empty());
+  assert!(pending(&a).unwrap().is_empty());
 }
 
 #[test]
@@ -869,30 +844,22 @@ fn removal_candidates_are_kept_unless_confirmed() {
 fn instructions_and_custom_agents_conflict_per_item() {
   let tmp = tempfile::tempdir().unwrap();
   let repo = FakeRepo::initialized();
-  let (a, b) = synced_pair(tmp.path(), &repo, |a| add_instruction(a, NOTE, "# rules\n"));
-  let write_agents = |env: &Env, id: &str| {
-    fs::write(
-      env.config_dir.join(USER_AGENT_APPS_FILE),
-      serde_json::to_string(&vec![AgentApp {
-        is_user_custom: true,
-        ..app(id)
-      }])
-      .unwrap(),
-    )
-    .unwrap();
-  };
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_instruction(a, NOTE, "# rules\n");
+    write_custom_agents(a, &[custom_agent("shared-agent", "Shared")]);
+  });
   fs::write(a.instruction_file(NOTE), "# rules from a\n").unwrap();
-  write_agents(&a, "agent-a");
+  write_custom_agents(&a, &[custom_agent("shared-agent", "From a")]);
   backup_with(&a, &repo).unwrap();
   fs::write(b.instruction_file(NOTE), "# rules from b\n").unwrap();
-  write_agents(&b, "agent-b");
+  write_custom_agents(&b, &[custom_agent("shared-agent", "From b")]);
 
   let planned = plan(&b, &repo, RestoreMode::Pull);
   assert_eq!(
     resolutions(&planned),
     vec![
       (instruction_key(NOTE), Resolution::Conflict),
-      (AGENTS_KEY.to_string(), Resolution::Conflict),
+      (agent_key("shared-agent"), Resolution::Conflict),
     ]
   );
   // Agents cannot be kept twice.
@@ -902,7 +869,7 @@ fn instructions_and_custom_agents_conflict_per_item() {
     &planned,
     &decide(&[
       (&instruction_key(NOTE), ConflictChoice::KeepLocal),
-      (AGENTS_KEY, ConflictChoice::KeepBoth),
+      (&agent_key("shared-agent"), ConflictChoice::KeepBoth),
     ]),
     &RestoreOptions::default(),
     InstallMode::Copy,
@@ -914,7 +881,7 @@ fn instructions_and_custom_agents_conflict_per_item() {
     &planned,
     decide(&[
       (&instruction_key(NOTE), ConflictChoice::KeepLocal),
-      (AGENTS_KEY, ConflictChoice::TakeRemote),
+      (&agent_key("shared-agent"), ConflictChoice::TakeRemote),
     ]),
   );
   assert!(outcome.agents_changed);
@@ -923,7 +890,7 @@ fn instructions_and_custom_agents_conflict_per_item() {
     fs::read_to_string(b.instruction_file(NOTE)).unwrap(),
     "# rules from b\n"
   );
-  assert!(read_user_agent_apps(&b).unwrap()[0].id == "agent-a");
+  assert_eq!(read_user_agent_apps(&b).unwrap()[0].display_name, "From a");
   assert_eq!(
     repo.head_file(&format!("instructions/{}.md", NOTE)),
     Some(b"# rules from b\n".to_vec())
@@ -931,28 +898,27 @@ fn instructions_and_custom_agents_conflict_per_item() {
 }
 
 #[test]
-fn a_difference_only_in_agents_never_conflicts() {
+fn installs_on_two_computers_never_conflict() {
   let tmp = tempfile::tempdir().unwrap();
   let repo = FakeRepo::initialized();
-  let a = computer(tmp.path(), "a", &["claude-code", "codex"]);
-  add_skill(&a, FOO, "foo", "v1");
-  backup_with(&a, &repo).unwrap();
-  let b = computer(tmp.path(), "b", &["claude-code", "codex"]);
-  pull(&b, &repo);
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
 
   install(&a, FOO, &["claude-code"]);
-  backup_with(&a, &repo).unwrap();
-  install(&b, FOO, &["codex"]);
-
-  let planned = plan(&b, &repo, RestoreMode::Pull);
-  assert!(planned.items.is_empty(), "{:?}", planned.items);
-  let outcome = apply(&b, &repo, &planned, RestoreDecisions::default());
-  assert!(outcome.pushed);
+  assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
+  install(&b, FOO, &["claude-code"]);
+  let backup = backup_with(&b, &repo).unwrap();
+  assert_eq!(backup.result, BackupResult::Pushed);
+  assert_eq!(backup.incoming, 0);
   assert_eq!(
-    library_at_head(&repo).skills[FOO].agents,
-    vec!["claude-code", "codex"]
+    device_file(&repo, &a).by_item()[&skill_key(FOO)],
+    vec!["claude-code"]
+  );
+  assert_eq!(
+    device_file(&repo, &b).by_item()[&skill_key(FOO)],
+    vec!["claude-code"]
   );
   assert!(status(&b).unwrap().changes.is_empty());
+  assert!(pending(&b).unwrap().is_empty());
 }
 
 #[test]
@@ -1309,12 +1275,13 @@ fn restore_can_apply_the_installs() {
   let a = computer(tmp.path(), "a", &["claude-code"]);
   add_skill(&a, FOO, "foo", "v1");
   install(&a, FOO, &["claude-code"]);
+  let installed = backup_with(&a, &repo).unwrap().commit.unwrap();
+  uninstall(&a, FOO, "claude-code");
   backup_with(&a, &repo).unwrap();
 
-  let b = computer(tmp.path(), "b", &["claude-code"]);
-  let planned = plan(&b, &repo, RestoreMode::Pull);
+  let planned = plan_restore_with(&a, &repo, RestoreMode::Pull, Some(&installed)).unwrap();
   let outcome = apply_restore_with(
-    &b,
+    &a,
     &repo,
     &planned,
     &RestoreDecisions::default(),
@@ -1326,8 +1293,8 @@ fn restore_can_apply_the_installs() {
   .unwrap();
   let installs = outcome.installs.unwrap();
   assert_eq!(installs.applied, 1, "{:?}", installs.failures);
-  assert!(b.home.join(".claude-code/skills/foo/SKILL.md").is_file());
-  assert!(pending(&b).unwrap().is_empty());
+  assert!(a.home.join(".claude-code/skills/foo/SKILL.md").is_file());
+  assert!(pending(&a).unwrap().is_empty());
 }
 
 #[test]
@@ -1541,12 +1508,14 @@ fn undo_takes_back_the_installs_of_the_restore() {
   let a = computer(tmp.path(), "a", &["claude-code"]);
   add_skill(&a, FOO, "foo", "v1");
   install(&a, FOO, &["claude-code"]);
+  let installed = backup_with(&a, &repo).unwrap().commit.unwrap();
+  uninstall(&a, FOO, "claude-code");
   backup_with(&a, &repo).unwrap();
+  let state_before = fs::read(state_path(&a)).unwrap();
 
-  let b = computer(tmp.path(), "b", &["claude-code"]);
-  let planned = plan(&b, &repo, RestoreMode::Pull);
+  let planned = plan_restore_with(&a, &repo, RestoreMode::Pull, Some(&installed)).unwrap();
   let outcome = apply_restore_with(
-    &b,
+    &a,
     &repo,
     &planned,
     &RestoreDecisions::default(),
@@ -1557,13 +1526,22 @@ fn undo_takes_back_the_installs_of_the_restore() {
   )
   .unwrap();
   assert_eq!(outcome.installs.unwrap().applied, 1);
-  let target = b.home.join(".claude-code/skills/foo");
+  let target = a.home.join(".claude-code/skills/foo");
   assert!(target.join("SKILL.md").is_file());
+  assert!(!read_state(&a)
+    .unwrap()
+    .base_device
+    .unwrap()
+    .installs
+    .is_empty());
 
-  undo_restore(&b).unwrap();
+  undo_restore(&a).unwrap();
   assert!(!target.exists());
-  assert!(store(&b).read().unwrap().skills.is_empty());
-  assert!(status(&b).unwrap().checkpoint.is_none());
+  assert!(store(&a).read().unwrap().skills[FOO].installs.is_empty());
+  // The sync state, with the device file of the base, is back.
+  assert_eq!(fs::read(state_path(&a)).unwrap(), state_before);
+  assert!(pending(&a).unwrap().is_empty());
+  assert!(status(&a).unwrap().checkpoint.is_none());
 }
 
 #[test]
@@ -1613,4 +1591,783 @@ fn undo_keeps_the_checkpoint_until_every_link_is_back() {
     b.hub_dir(BAR, "foo")
   );
   assert!(status(&b).unwrap().checkpoint.is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Layout version 2: device files, item scope, backup on a moved head
+// ---------------------------------------------------------------------------
+
+fn uninstall(env: &Env, id: &str, agent: &str) {
+  let result = install_service::uninstall_skill(
+    env,
+    UninstallRequest {
+      name: id.to_string(),
+      targets: vec![InstallTargetSpec {
+        scope: InstallScope::User,
+        project_path: None,
+        agent_id: agent.to_string(),
+      }],
+      paths: Vec::new(),
+      force: false,
+    },
+  )
+  .unwrap();
+  assert!(result.applied, "{:?}", result.blockers);
+}
+
+fn custom_agent(id: &str, display_name: &str) -> AgentApp {
+  AgentApp {
+    display_name: display_name.to_string(),
+    is_user_custom: true,
+    ..app(id)
+  }
+}
+
+fn write_custom_agents(env: &Env, apps: &[AgentApp]) {
+  fs::write(
+    env.config_dir.join(USER_AGENT_APPS_FILE),
+    serde_json::to_string(apps).unwrap(),
+  )
+  .unwrap();
+}
+
+fn device_id(env: &Env) -> String {
+  read_state(env).unwrap().device_id.unwrap()
+}
+
+fn device_file(repo: &FakeRepo, env: &Env) -> DeviceFile {
+  serde_json::from_slice(&repo.head_file(&device_path(&device_id(env))).unwrap()).unwrap()
+}
+
+fn agents_at_head(repo: &FakeRepo) -> Vec<SyncedAgent> {
+  parse_agents(&repo.head_file(AGENTS_FILE).unwrap()).unwrap()
+}
+
+/// Replace the head with a commit whose files are `files` plus `extra` contents.
+fn commit_files(
+  repo: &FakeRepo,
+  mut files: BTreeMap<String, TreeFile>,
+  extra: &[(&str, Vec<u8>)],
+  message: &str,
+) -> String {
+  for (path, content) in extra {
+    let sha = repo.create_blob(content).unwrap();
+    files.insert(
+      path.to_string(),
+      TreeFile {
+        mode: MODE_FILE.to_string(),
+        sha,
+      },
+    );
+  }
+  let head = repo.head_commit();
+  let tree = repo.create_tree(&files).unwrap();
+  let commit = repo.create_commit(message, &tree, Some(&head)).unwrap();
+  repo.update_head(&commit).unwrap();
+  commit
+}
+
+/// Turn the head into the version 1 layout of release 0.10.0: `agents` on each record
+/// (`agents` gives them), no scope, no device files.
+fn downgrade_head(repo: &FakeRepo, agents: &[(&str, &[&str])]) -> String {
+  let mut library: serde_json::Value =
+    serde_json::from_slice(&repo.head_file(LIBRARY_FILE).unwrap()).unwrap();
+  library["version"] = 1.into();
+  for kind in ["skills", "instructions"] {
+    for (id, record) in library[kind].as_object_mut().unwrap().iter_mut() {
+      let record = record.as_object_mut().unwrap();
+      record.remove("scope");
+      let enabled = agents
+        .iter()
+        .find(|(item, _)| item == id)
+        .map(|(_, agents)| agents.to_vec())
+        .unwrap_or_default();
+      record.insert("agents".to_string(), serde_json::json!(enabled));
+    }
+  }
+  let mut custom: Vec<serde_json::Value> =
+    serde_json::from_slice(&repo.head_file(AGENTS_FILE).unwrap()).unwrap();
+  for agent in &mut custom {
+    agent.as_object_mut().unwrap().remove("scope");
+  }
+  let mut files = repo.files_at(&repo.head_commit(), "");
+  files.retain(|path, _| !path.starts_with("devices/"));
+  commit_files(
+    repo,
+    files,
+    &[
+      (LIBRARY_FILE, pretty_json(&library).unwrap()),
+      (AGENTS_FILE, pretty_json(&custom).unwrap()),
+    ],
+    "Backup from an old app",
+  )
+}
+
+/// Make `env` a computer of release 0.10.0 whose base is the head: no device id, no
+/// device file and no custom agents in the sync state.
+fn old_app_state(env: &Env, repo: &FakeRepo) {
+  let head = repo.head_commit();
+  let mut state = read_state(env).unwrap();
+  state.device_id = None;
+  state.last_synced_commit = Some(head.clone());
+  state.base_files = repo.files_at(&head, "");
+  state.base_library =
+    Some(serde_json::from_slice(&repo.head_file(LIBRARY_FILE).unwrap()).unwrap());
+  state.base_agents = None;
+  state.base_device = None;
+  state.base_local_agents = store(env)
+    .read()
+    .unwrap()
+    .skills
+    .iter()
+    .filter(|(_, record)| !record.installs.is_empty())
+    .map(|(id, record)| (skill_key(id), user_agents(&record.installs)))
+    .collect();
+  write_state(env, &state).unwrap();
+}
+
+const OTHER_DEVICE: &str = "00000000-0000-4000-8000-0000000000dd";
+const OTHER_SKILL: &str = "00000000-0000-4000-8000-0000000000d1";
+
+/// Add a device-only skill, a device-only custom agent and the device file of another
+/// device to the head.
+fn add_other_device(repo: &FakeRepo) {
+  let mut library = library_at_head(repo);
+  library.skills.insert(
+    OTHER_SKILL.to_string(),
+    LibrarySkill {
+      name: "theirs".to_string(),
+      source: SkillSource::None,
+      hash: "h".to_string(),
+      imported_at: "2026-10-01T00:00:00Z".to_string(),
+      updated_at: "2026-10-01T00:00:00Z".to_string(),
+      scope: Scope::Device(OTHER_DEVICE.to_string()),
+    },
+  );
+  let mut agents = agents_at_head(repo);
+  agents.push(SyncedAgent {
+    app: custom_agent("their-agent", "Theirs"),
+    scope: Scope::Device(OTHER_DEVICE.to_string()),
+  });
+  let other = DeviceFile {
+    name: "other".to_string(),
+    installs: BTreeMap::from([(
+      "claude-code".to_string(),
+      vec![DeviceInstall {
+        kind: ItemKind::Skill,
+        id: OTHER_SKILL.to_string(),
+      }],
+    )]),
+    last_backup_at: None,
+  };
+  commit_files(
+    repo,
+    repo.files_at(&repo.head_commit(), ""),
+    &[
+      (LIBRARY_FILE, pretty_json(&library).unwrap()),
+      (AGENTS_FILE, pretty_json(&agents).unwrap()),
+      (
+        &format!("skills/{}/theirs/SKILL.md", OTHER_SKILL),
+        b"theirs".to_vec(),
+      ),
+      (&device_path(OTHER_DEVICE), pretty_json(&other).unwrap()),
+    ],
+    "Backup from other",
+  );
+}
+
+/// The parts of the other device are in the head unchanged.
+fn assert_other_device_kept(repo: &FakeRepo) {
+  let library = library_at_head(repo);
+  assert_eq!(
+    library.skills[OTHER_SKILL].scope,
+    Scope::Device(OTHER_DEVICE.to_string())
+  );
+  assert_eq!(
+    repo.head_file(&format!("skills/{}/theirs/SKILL.md", OTHER_SKILL)),
+    Some(b"theirs".to_vec())
+  );
+  assert!(agents_at_head(repo)
+    .iter()
+    .any(|agent| agent.app.id == "their-agent"));
+  let other: DeviceFile =
+    serde_json::from_slice(&repo.head_file(&device_path(OTHER_DEVICE)).unwrap()).unwrap();
+  assert_eq!(other.name, "other");
+}
+
+fn assert_not_here(env: &Env) {
+  assert!(!store(env).read().unwrap().skills.contains_key(OTHER_SKILL));
+  assert!(!env.hub_root.join(OTHER_SKILL).exists());
+  assert!(read_user_agent_apps(env)
+    .unwrap()
+    .iter()
+    .all(|app| app.id != "their-agent"));
+}
+
+#[test]
+fn device_gets_shared_items_and_its_own_items_only() {
+  assert!(device_gets(&Scope::Shared, "me"));
+  assert!(device_gets(&Scope::Device("me".to_string()), "me"));
+  assert!(!device_gets(&Scope::Device("other".to_string()), "me"));
+  assert!(!device_gets(&Scope::Device("other".to_string()), ""));
+}
+
+#[test]
+fn a_library_above_this_version_is_refused() {
+  // Releases up to 0.10.0 refuse a library above version 1; this one refuses above 2.
+  const { assert!(LIBRARY_VERSION > 1) };
+  let newer = LibraryFile {
+    version: LIBRARY_VERSION + 1,
+    ..LibraryFile::default()
+  };
+  let err = restore::parse_library(&pretty_json(&newer).unwrap()).unwrap_err();
+  assert!(err.contains("newer YouSkill"), "{}", err);
+  let current = LibraryFile::default();
+  assert!(restore::parse_library(&pretty_json(&current).unwrap()).is_ok());
+}
+
+#[test]
+fn migration_writes_one_commit_with_shared_items_and_this_device_file() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code", "codex"]);
+  add_skill(&a, FOO, "foo", "v1");
+  install(&a, FOO, &["claude-code"]);
+  write_custom_agents(&a, &[custom_agent("my-agent", "Mine")]);
+  backup_with(&a, &repo).unwrap();
+  // The old union of all devices enables codex too; this computer only has claude-code.
+  let old = downgrade_head(&repo, &[(FOO, &["claude-code", "codex"])]);
+  old_app_state(&a, &repo);
+
+  assert_eq!(
+    backup_with(&a, &repo).unwrap().result,
+    BackupResult::MigrationRequired
+  );
+  assert_eq!(
+    plan(&a, &repo, RestoreMode::Pull).state,
+    PlanState::MigrationRequired
+  );
+  assert_eq!(
+    repo.head_commit(),
+    old,
+    "nothing is written before the migration"
+  );
+
+  assert!(status(&a).unwrap().legacy_base);
+
+  let commits = repo.commit_count();
+  migrate_with(&a, &repo).unwrap();
+  assert!(!status(&a).unwrap().legacy_base);
+  assert_eq!(repo.commit_count(), commits + 1);
+  let head = repo.head_commit();
+  assert_eq!(repo.parent_of(&head), Some(old));
+  let text = String::from_utf8(repo.head_file(LIBRARY_FILE).unwrap()).unwrap();
+  assert!(!text.contains("\"agents\""), "{}", text);
+  let library = library_at_head(&repo);
+  assert_eq!(library.version, 2);
+  assert_eq!(library.skills[FOO].scope, Scope::Shared);
+  assert_eq!(agents_at_head(&repo)[0].scope, Scope::Shared);
+  assert_eq!(
+    device_file(&repo, &a).by_item(),
+    BTreeMap::from([(skill_key(FOO), vec!["claude-code".to_string()])])
+  );
+
+  // The migration commit is the base: nothing more to back up, nothing pending.
+  assert_eq!(status_commit(&a), Some(head.clone()));
+  assert!(status(&a).unwrap().changes.is_empty());
+  assert_eq!(
+    backup_with(&a, &repo).unwrap().result,
+    BackupResult::UpToDate
+  );
+  assert!(pending(&a).unwrap().is_empty());
+  // A second migration does nothing.
+  migrate_with(&a, &repo).unwrap();
+  assert_eq!(repo.head_commit(), head);
+}
+
+#[test]
+fn a_computer_with_a_version_1_base_syncs_after_the_migration() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    add_skill(a, BAR, "bar", "v1");
+    write_custom_agents(a, &[custom_agent("my-agent", "Mine")]);
+  });
+  install(&b, FOO, &["claude-code"]);
+  downgrade_head(&repo, &[(FOO, &["claude-code"])]);
+  old_app_state(&a, &repo);
+  old_app_state(&b, &repo);
+
+  migrate_with(&a, &repo).unwrap();
+  let migrated = repo.head_commit();
+
+  // B reads its version 1 base as version 2: no false changes, only its new device file.
+  let changes = status(&b).unwrap().changes;
+  assert_eq!(
+    changes.iter().map(|c| c.kind).collect::<Vec<_>>(),
+    vec![ItemKind::Device],
+    "{:?}",
+    changes
+  );
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  assert!(planned.items.is_empty(), "{:?}", planned.items);
+  let backup = backup_with(&b, &repo).unwrap();
+  assert_eq!(backup.result, BackupResult::Pushed);
+  assert_eq!(backup.incoming, 0);
+  assert_eq!(repo.parent_of(&repo.head_commit()), Some(migrated));
+  assert!(read_state(&b).unwrap().device_id.is_some());
+  assert_eq!(
+    device_file(&repo, &b).by_item(),
+    BTreeMap::from([(skill_key(FOO), vec!["claude-code".to_string()])])
+  );
+  assert!(device_file(&repo, &a).installs.is_empty());
+  assert_eq!(library_at_head(&repo).skills.len(), 2);
+  assert_eq!(agents_at_head(&repo).len(), 1);
+  assert!(pending(&b).unwrap().is_empty());
+}
+
+#[test]
+fn migration_on_a_moved_head_keeps_the_changes_of_the_other_computer() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
+  install(&b, FOO, &["claude-code"]);
+  downgrade_head(&repo, &[(FOO, &["claude-code"])]);
+  old_app_state(&a, &repo);
+  old_app_state(&b, &repo);
+
+  // An old app on A backs up BAR after B's last sync.
+  let mut library: serde_json::Value =
+    serde_json::from_slice(&repo.head_file(LIBRARY_FILE).unwrap()).unwrap();
+  library["skills"][BAR] = serde_json::json!({
+    "name": "bar", "hash": "h", "importedAt": "t", "updatedAt": "t", "agents": []
+  });
+  commit_files(
+    &repo,
+    repo.files_at(&repo.head_commit(), ""),
+    &[
+      (LIBRARY_FILE, pretty_json(&library).unwrap()),
+      (&format!("skills/{}/bar/SKILL.md", BAR), b"bar".to_vec()),
+    ],
+    "Backup from an old app",
+  );
+
+  migrate_with(&b, &repo).unwrap();
+  let migrated = repo.head_commit();
+  assert_eq!(status_commit(&b), Some(migrated.clone()));
+  assert!(read_state(&b).unwrap().last_backup_at.is_some());
+  assert!(
+    read_state(&b)
+      .unwrap()
+      .incoming
+      .contains_key(&skill_key(BAR)),
+    "BAR is kept for the next restore"
+  );
+  assert!(status(&b).unwrap().changes.is_empty());
+  assert_eq!(
+    backup_with(&b, &repo).unwrap().result,
+    BackupResult::UpToDate
+  );
+  assert_eq!(
+    repo.head_commit(),
+    migrated,
+    "no commit after the migration"
+  );
+
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  let bar = item(&planned, &skill_key(BAR));
+  assert_eq!(bar.resolution, Resolution::TakeRemote);
+  assert!(!bar.deferred);
+}
+
+#[test]
+fn first_connect_to_a_version_1_repository_asks_for_the_migration() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  backup_with(&a, &repo).unwrap();
+  downgrade_head(&repo, &[(FOO, &["claude-code"])]);
+
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  add_skill(&b, BAR, "bar", "v1");
+  assert_eq!(
+    plan(&b, &repo, RestoreMode::Merge).state,
+    PlanState::MigrationRequired
+  );
+  migrate_with(&b, &repo).unwrap();
+  assert_eq!(library_at_head(&repo).version, 2);
+  assert!(
+    status_commit(&b).is_none(),
+    "the first connect still has no base"
+  );
+
+  let planned = plan(&b, &repo, RestoreMode::Merge);
+  assert_eq!(planned.state, PlanState::Ready);
+  apply(&b, &repo, &planned, RestoreDecisions::default());
+  let library = library_at_head(&repo);
+  assert!(library.skills.contains_key(FOO) && library.skills.contains_key(BAR));
+  assert!(store(&b).read().unwrap().skills.contains_key(FOO));
+}
+
+#[test]
+fn backup_on_a_moved_head_keeps_the_changes_of_the_other_computer() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    add_skill(a, BAR, "bar", "v1");
+  });
+  edit_skill(&a, FOO, "foo", "from a");
+  install(&a, FOO, &["claude-code"]);
+  backup_with(&a, &repo).unwrap();
+  let a_files = repo.files_at(&repo.head_commit(), &format!("skills/{}/", FOO));
+
+  edit_skill(&b, BAR, "bar", "from b");
+  let backup = backup_with(&b, &repo).unwrap();
+  assert_eq!(backup.result, BackupResult::Pushed);
+  assert_eq!(backup.incoming, 1);
+  assert!(
+    skill_body(&b, FOO, "foo").contains("v1"),
+    "not written here"
+  );
+  let head = repo.head_commit();
+  assert_eq!(repo.files_at(&head, &format!("skills/{}/", FOO)), a_files);
+  assert!(String::from_utf8(
+    repo
+      .head_file(&format!("skills/{}/bar/SKILL.md", BAR))
+      .unwrap()
+  )
+  .unwrap()
+  .contains("from b"));
+  assert_eq!(
+    device_file(&repo, &a).by_item()[&skill_key(FOO)],
+    vec!["claude-code"]
+  );
+  assert!(status(&b).unwrap().changes.is_empty());
+
+  // A second backup does not revert the change of A.
+  add_skill(&b, BAZ, "baz", "v1");
+  assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
+  assert_eq!(
+    repo.files_at(&repo.head_commit(), &format!("skills/{}/", FOO)),
+    a_files
+  );
+
+  // The next restore offers it, selected by default.
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  let foo = item(&planned, &skill_key(FOO));
+  assert_eq!(foo.resolution, Resolution::TakeRemote);
+  assert!(!foo.deferred);
+  let outcome = apply(&b, &repo, &planned, RestoreDecisions::default());
+  assert!(!outcome.pushed);
+  assert_eq!(hub_hash(&a, FOO, "foo"), hub_hash(&b, FOO, "foo"));
+  assert!(read_state(&b).unwrap().incoming.is_empty());
+  assert!(status(&b).unwrap().changes.is_empty());
+  assert!(pending(&b).unwrap().is_empty());
+}
+
+#[test]
+fn an_incoming_item_edited_here_is_a_conflict() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    add_skill(a, BAR, "bar", "v1");
+  });
+  edit_skill(&a, FOO, "foo", "from a");
+  backup_with(&a, &repo).unwrap();
+  edit_skill(&b, BAR, "bar", "from b");
+  backup_with(&b, &repo).unwrap();
+
+  edit_skill(&b, FOO, "foo", "from b");
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  assert_eq!(
+    resolutions(&planned),
+    vec![(skill_key(FOO), Resolution::Conflict)]
+  );
+}
+
+#[test]
+fn backup_with_a_change_on_both_sides_writes_nothing() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
+  edit_skill(&a, FOO, "foo", "from a");
+  backup_with(&a, &repo).unwrap();
+  edit_skill(&b, FOO, "foo", "from b");
+
+  let head = repo.head_commit();
+  let commits = repo.commit_count();
+  let state = fs::read(state_path(&b)).unwrap();
+  assert_eq!(
+    backup_with(&b, &repo).unwrap().result,
+    BackupResult::Diverged
+  );
+  assert_eq!(repo.head_commit(), head);
+  assert_eq!(repo.commit_count(), commits);
+  assert_eq!(fs::read(state_path(&b)).unwrap(), state);
+}
+
+#[test]
+fn a_removal_on_a_moved_head_is_kept_and_offered() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    add_skill(a, BAR, "bar", "v1");
+  });
+  hub_service::remove_hub_skill(&a, FOO, false).unwrap();
+  backup_with(&a, &repo).unwrap();
+
+  edit_skill(&b, BAR, "bar", "from b");
+  assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
+  assert!(!library_at_head(&repo).skills.contains_key(FOO));
+  assert!(store(&b).read().unwrap().skills.contains_key(FOO));
+  add_skill(&b, BAZ, "baz", "v1");
+  assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
+  assert!(!library_at_head(&repo).skills.contains_key(FOO));
+
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  assert_eq!(
+    resolutions(&planned),
+    vec![(skill_key(FOO), Resolution::RemovalCandidate)]
+  );
+  apply(
+    &b,
+    &repo,
+    &planned,
+    RestoreDecisions {
+      removals: BTreeMap::from([(skill_key(FOO), RemovalChoice::Remove)]),
+      ..Default::default()
+    },
+  );
+  assert!(!store(&b).read().unwrap().skills.contains_key(FOO));
+  assert!(status(&b).unwrap().changes.is_empty());
+}
+
+#[test]
+fn a_deferred_item_changed_again_on_a_moved_head_becomes_incoming() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
+  edit_skill(&a, FOO, "foo", "v2");
+  backup_with(&a, &repo).unwrap();
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  apply(
+    &b,
+    &repo,
+    &planned,
+    RestoreDecisions {
+      include: BTreeMap::from([(skill_key(FOO), false)]),
+      ..Default::default()
+    },
+  );
+  pull(&a, &repo);
+  edit_skill(&a, FOO, "foo", "v3");
+  backup_with(&a, &repo).unwrap();
+
+  add_skill(&b, BAR, "bar", "v1");
+  assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
+  let state = read_state(&b).unwrap();
+  assert!(state.deferred.is_empty());
+  assert!(state.incoming.contains_key(&skill_key(FOO)));
+  assert!(String::from_utf8(
+    repo
+      .head_file(&format!("skills/{}/foo/SKILL.md", FOO))
+      .unwrap()
+  )
+  .unwrap()
+  .contains("v3"));
+  assert!(!item(&plan(&b, &repo, RestoreMode::Pull), &skill_key(FOO)).deferred);
+}
+
+#[test]
+fn custom_agents_merge_one_by_one() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
+  write_custom_agents(&a, &[custom_agent("agent-a", "A")]);
+  backup_with(&a, &repo).unwrap();
+  write_custom_agents(&b, &[custom_agent("agent-b", "B")]);
+
+  let backup = backup_with(&b, &repo).unwrap();
+  assert_eq!(backup.result, BackupResult::Pushed);
+  assert_eq!(
+    agents_at_head(&repo)
+      .iter()
+      .map(|agent| agent.app.id.as_str())
+      .collect::<Vec<_>>(),
+    vec!["agent-a", "agent-b"]
+  );
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  assert_eq!(
+    resolutions(&planned),
+    vec![(agent_key("agent-a"), Resolution::TakeRemote)]
+  );
+  let outcome = apply(&b, &repo, &planned, RestoreDecisions::default());
+  assert!(outcome.agents_changed);
+  assert_eq!(
+    read_user_agent_apps(&b)
+      .unwrap()
+      .iter()
+      .map(|app| app.id.as_str())
+      .collect::<Vec<_>>(),
+    vec!["agent-a", "agent-b"]
+  );
+}
+
+#[test]
+fn the_parts_of_other_devices_survive_every_sync() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  let first = backup_with(&a, &repo).unwrap().commit.unwrap();
+  add_other_device(&repo);
+
+  // Backup on the moved head.
+  edit_skill(&a, FOO, "foo", "v2");
+  assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
+  assert_other_device_kept(&repo);
+  let planned = plan(&a, &repo, RestoreMode::Pull);
+  assert!(planned.items.is_empty(), "{:?}", planned.items);
+
+  // Backup on its own base.
+  add_skill(&a, BAR, "bar", "v1");
+  assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
+  assert_other_device_kept(&repo);
+
+  // Restore of an earlier commit (before the other device existed).
+  let planned = plan_restore_with(&a, &repo, RestoreMode::Pull, Some(&first)).unwrap();
+  let outcome = apply(&a, &repo, &planned, RestoreDecisions::default());
+  assert!(outcome.pushed);
+  assert_other_device_kept(&repo);
+  assert!(skill_body(&a, FOO, "foo").contains("v1"));
+  assert_not_here(&a);
+
+  // A new computer restores and replaces the repository.
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  pull(&b, &repo);
+  assert_not_here(&b);
+  assert_other_device_kept(&repo);
+  let c = computer(tmp.path(), "c", &["claude-code"]);
+  add_skill(&c, BAZ, "baz", "v1");
+  let planned = plan(&c, &repo, RestoreMode::ReplaceRemote);
+  apply(&c, &repo, &planned, RestoreDecisions::default());
+  assert_other_device_kept(&repo);
+  let library = library_at_head(&repo);
+  assert!(library.skills.contains_key(BAZ) && !library.skills.contains_key(FOO));
+  assert_not_here(&c);
+  assert!(status(&c).unwrap().changes.is_empty());
+}
+
+#[test]
+fn pending_comes_from_this_device_file_only() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  backup_with(&a, &repo).unwrap();
+  // Another device lists FOO for claude-code.
+  let other = DeviceFile {
+    name: "other".to_string(),
+    installs: BTreeMap::from([(
+      "claude-code".to_string(),
+      vec![DeviceInstall {
+        kind: ItemKind::Skill,
+        id: FOO.to_string(),
+      }],
+    )]),
+    last_backup_at: None,
+  };
+  commit_files(
+    &repo,
+    repo.files_at(&repo.head_commit(), ""),
+    &[(&device_path(OTHER_DEVICE), pretty_json(&other).unwrap())],
+    "Backup from other",
+  );
+  pull(&a, &repo);
+  assert!(pending(&a).unwrap().is_empty());
+}
+
+#[test]
+fn a_sync_state_of_version_1_is_read() {
+  let tmp = tempfile::tempdir().unwrap();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  let old = serde_json::json!({
+    "repo": "me/youskill-library",
+    "branch": "main",
+    "lastSyncedCommit": "c1",
+    "baseLibrary": {
+      "format": "youskill-library",
+      "version": 1,
+      "skills": { FOO: {
+        "name": "foo", "hash": "h", "importedAt": "t", "updatedAt": "t",
+        "agents": ["claude-code", "codex"]
+      }}
+    },
+    "baseLocalAgents": { "skill:x": ["claude-code"] },
+    "deferred": {
+      "agents": { "entry": { "kind": "agents" }, "files": {} }
+    }
+  });
+  fs::write(state_path(&a), serde_json::to_vec(&old).unwrap()).unwrap();
+  let state = read_state(&a).unwrap();
+  assert!(state.device_id.is_none());
+  assert!(state.deferred.is_empty());
+  let library = state.base_library.unwrap();
+  assert_eq!(library.version, 1);
+  assert_eq!(library.skills[FOO].scope, Scope::Shared);
+}
+
+#[test]
+fn first_connect_migration_maps_the_installs_of_paired_items() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  backup_with(&a, &repo).unwrap();
+  downgrade_head(&repo, &[(FOO, &["claude-code"])]);
+
+  // B has the same skill under another id, installed for claude-code.
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  add_skill(&b, BAR, "foo", "v1");
+  install(&b, BAR, &["claude-code"]);
+  migrate_with(&b, &repo).unwrap();
+  assert_eq!(
+    device_file(&repo, &b).by_item(),
+    BTreeMap::from([(skill_key(FOO), vec!["claude-code".to_string()])])
+  );
+}
+
+#[test]
+fn a_restore_before_this_device_joined_keeps_its_installs() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  let before = backup_with(&a, &repo).unwrap().commit.unwrap();
+
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  pull(&b, &repo);
+  install(&b, FOO, &["claude-code"]);
+  edit_skill(&b, FOO, "foo", "v2");
+  assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
+
+  // The earlier commit has no device file of B: its content comes back, its installs stay.
+  let planned = plan_restore_with(&b, &repo, RestoreMode::Pull, Some(&before)).unwrap();
+  apply(&b, &repo, &planned, RestoreDecisions::default());
+  assert!(skill_body(&b, FOO, "foo").contains("v1"));
+  assert!(pending(&b).unwrap().is_empty());
+  assert_eq!(
+    device_file(&repo, &b).by_item()[&skill_key(FOO)],
+    vec!["claude-code"]
+  );
+  assert!(status(&b).unwrap().changes.is_empty());
+  assert_eq!(
+    backup_with(&b, &repo).unwrap().result,
+    BackupResult::UpToDate
+  );
 }
