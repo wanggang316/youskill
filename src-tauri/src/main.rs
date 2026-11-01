@@ -8,6 +8,7 @@ use tauri::webview::PageLoadEvent;
 use tauri::window::{Effect, EffectState, EffectsBuilder};
 use tauri::{App, AppHandle, Manager, WebviewWindow, WebviewWindowBuilder};
 
+mod account;
 #[cfg(target_os = "macos")]
 mod app_menu;
 mod commands;
@@ -16,6 +17,7 @@ mod tray;
 use youskill_core::{config, models, services, utils};
 
 use commands::{
+  account::{account_sign_in, account_sign_out, account_status},
   agent_apps::{
     add_user_agent_app, list_local_agent_apps, refresh_agent_apps, remove_user_agent_app,
     update_user_agent_app,
@@ -124,6 +126,15 @@ fn main() {
     .init();
 
   tauri::Builder::default()
+    // First, so a second instance only forwards its deep link to this one and exits.
+    .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+      if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+      }
+    }))
+    .plugin(tauri_plugin_deep_link::init())
     .plugin(tauri_plugin_dialog::init())
     .plugin(tauri_plugin_shell::init())
     .plugin(tauri_plugin_fs::init())
@@ -136,6 +147,7 @@ fn main() {
     })
     .setup(|app| {
       let main_window = build_main_window(app)?;
+      account::setup(app)?;
 
       // Fallback for a page load that never finishes, so the window cannot stay hidden.
       let handle = app.handle().clone();
@@ -171,6 +183,9 @@ fn main() {
     })
     .invoke_handler(tauri::generate_handler![
       ping,
+      account_status,
+      account_sign_in,
+      account_sign_out,
       get_settings,
       update_settings,
       cli_status,

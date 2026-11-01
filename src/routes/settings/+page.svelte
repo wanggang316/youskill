@@ -4,6 +4,7 @@
   import {
     CloudUpload,
     Bot,
+    CircleUser,
     Github,
     Info,
     Keyboard,
@@ -12,6 +13,7 @@
     SquareTerminal,
   } from "@lucide/svelte";
   import AboutSection from "$lib/components/settings/AboutSection.svelte";
+  import AccountSection from "$lib/components/settings/AccountSection.svelte";
   import AgentAppsSection from "$lib/components/settings/AgentAppsSection.svelte";
   import CliSection from "$lib/components/settings/CliSection.svelte";
   import GeneralSection from "$lib/components/settings/GeneralSection.svelte";
@@ -31,6 +33,7 @@
   const sections: { key: SettingsSection; label: string; icon: Component<{ size?: number }> }[] =
     $derived([
       { key: "general", label: $t("settings.section.general"), icon: SlidersHorizontal },
+      { key: "account", label: $t("settings.account.title"), icon: CircleUser },
       { key: "agents", label: $t("agentApps.title"), icon: Bot },
       { key: "translation", label: $t("settings.translation.title"), icon: Languages },
       { key: "github", label: $t("settings.github.title"), icon: Github },
@@ -74,7 +77,9 @@
 
     <div class="surface-panel grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)]">
       {#key section}
-        {#if section === "agents"}
+        {#if section === "account"}
+          <AccountSection />
+        {:else if section === "agents"}
           <AgentAppsSection />
         {:else if section === "translation"}
           <TranslationSection />

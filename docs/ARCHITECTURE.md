@@ -298,8 +298,36 @@ local change is still pending (last write wins on `updatedAt`). A rejected add (
 reverted and reported. `Unauthorized` leaves the records as they are. `begin_account`
 marks all records pending and clears the cursor when the account changes, so the first
 sign-in merges local favorites as a union. The engine talks to the server through the
-`FavoriteServer` trait; the HTTP client, sign-in and token storage wait for the server API
-(youskill-web#68).
+`FavoriteServer` trait; its HTTP client waits for favorite sync (#68).
+
+## Account (`account_service`)
+
+The account API is `youskill-web/docs/account-api.md`. Sign-in uses PKCE in the system
+browser: `account_sign_in` makes a 64-character verifier and a random state, keeps them
+as the pending sign-in, and returns the start URL
+(`/api/account/sign-in/{github|apple}`, `code_challenge_method=S256`,
+`redirect_uri=youskill://auth/callback`) for the frontend to open. The server redirects to
+the deep link. The deep link plugin delivers it to the running app; on Windows and Linux
+the single instance plugin forwards it from the second process, which then exits; a link
+that starts the app is read with `get_current`. A callback with another state is an error
+and keeps the pending sign-in; a callback without a pending sign-in is ignored, so a second
+delivery does nothing. `error=access_denied` returns to signed out without a message.
+A code exchanges once for a session (`POST /api/account/token`).
+
+The session (access token, refresh token, expiry, provider, account) and the pending
+sign-in are items of the OS keychain (service `com.gumpw.youskill.account`, through the
+`SecretStore` trait); they are never in a config file or the frontend. The frontend gets
+only `AccountStatus` (account id, provider, display name) and the `account://changed`
+event after a callback or a revoked session. `AccountManager::access_token` refreshes
+when the token expires within 60 seconds, and `refresh_rejected` after a `401`; one async
+mutex holds the session across the refresh, so only one refresh runs at a time and the
+rotated refresh token replaces the old one before the lock is released. A `401` on
+refresh deletes the session and keeps `favorites.json`. A new session goes to memory
+before the keychain, so a failed keychain save cannot bring back a rotated refresh token.
+Sign-out refreshes an expired access token first, deletes the keychain items and
+`favorites.json` (favorites, account binding and cursor), then revokes the session on the
+server (best effort) without the session lock. A cancel (`access_denied`) of a sign-in that
+a newer one replaced is ignored; a new sign-in clears the last callback error.
 
 ## Global Search
 
@@ -328,6 +356,7 @@ helpers of `navigation/app-shell.ts`.
 | Projects     | `list_user_projects`, `add_user_project`, `update_user_project`, `remove_user_project`, `list_workspaces`, `add_workspace`, `remove_workspace`, `scan_workspace`, `register_projects`, `list_memory_files`                                                                                                                                                                                             |
 | Search       | `global_search`                                                                                                                                                                                                                                                                                                                                                                                        |
 | Favorites    | `list_favorites`, `set_favorite`                                                                                                                                                                                                                                                                                                                                                                       |
+| Account      | `account_status`, `account_sign_in`, `account_sign_out`                                                                                                                                                                                                                                                                                                                                                |
 | Detection    | `detect_github_manual`, `detect_github_auto`, `detect_zip`, `detect_folder` (stage into a temp dir)                                                                                                                                                                                                                                                                                                    |
 | Other        | marketplace, agent apps, projects, settings, library sync, file readers, translation                                                                                                                                                                                                                                                                                                                   |
 
