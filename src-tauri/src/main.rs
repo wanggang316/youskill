@@ -12,6 +12,7 @@ mod account;
 #[cfg(target_os = "macos")]
 mod app_menu;
 mod commands;
+mod favorite_sync;
 mod tray;
 
 use youskill_core::{config, models, services, utils};
@@ -148,6 +149,7 @@ fn main() {
     .setup(|app| {
       let main_window = build_main_window(app)?;
       account::setup(app)?;
+      favorite_sync::setup(app)?;
 
       // Fallback for a page load that never finishes, so the window cannot stay hidden.
       let handle = app.handle().clone();
@@ -169,14 +171,19 @@ fn main() {
 
       // Handle window close event - hide to tray instead of quitting
       let window_clone = main_window.clone();
+      let handle = app.handle().clone();
 
-      main_window.on_window_event(move |event| {
-        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+      main_window.on_window_event(move |event| match event {
+        tauri::WindowEvent::CloseRequested { api, .. } => {
           // Prevent window from closing
           api.prevent_close();
           // Just hide window instead
           let _ = window_clone.hide();
-        }
+        },
+        tauri::WindowEvent::Focused(true) => {
+          favorite_sync::request(&handle, favorite_sync::AFTER_FOCUS);
+        },
+        _ => {},
       });
 
       Ok(())

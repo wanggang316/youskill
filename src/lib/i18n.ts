@@ -644,6 +644,10 @@ const translations: Record<string, Dictionary> = {
     "market.sort.stars": "Most Stars",
     "market.favorites": "Favorites",
     "market.favorites.empty": "No favorites yet. Use the heart on a skill to keep it here.",
+    "market.favorites.limitReached":
+      "Your account has the maximum number of favorites, so the new favorite was removed. Remove a favorite and try again.",
+    "market.favorites.rejected":
+      "Your account did not accept some favorite changes, so they were undone on this computer.",
     "market.favorite": "Add to favorites",
     "market.unfavorite": "Remove from favorites",
     "market.unavailable": "Unavailable",
@@ -1422,6 +1426,9 @@ const translations: Record<string, Dictionary> = {
     "market.sort.stars": "Star 最多",
     "market.favorites": "收藏",
     "market.favorites.empty": "还没有收藏。点击 Skill 上的心形图标即可收藏到这里。",
+    "market.favorites.limitReached":
+      "账号的收藏已达上限，新加的收藏已撤销。请先移除一些收藏再添加。",
+    "market.favorites.rejected": "账号未接受部分收藏改动，这台电脑上的这些改动已撤销。",
     "market.favorite": "加入收藏",
     "market.unfavorite": "取消收藏",
     "market.unavailable": "已下架",

@@ -43,6 +43,9 @@ pub struct FavoriteStore {
   /// Server change sequence of the last pull.
   pub cursor: Option<String>,
   pub favorites: Vec<LocalFavorite>,
+  /// The first sync with `account_id` has not finished. Until it does, local favorites win
+  /// over account removals, so they merge into the account as a union.
+  pub merging: bool,
 }
 
 impl FavoriteStore {
@@ -147,11 +150,47 @@ impl FavoriteStore {
     }
   }
 
+  /// Makes a pushed local record later than `server`, the newer account record, so the next
+  /// push wins. It stays pending.
+  pub fn outdate(&mut self, skill_id: &str, server: &FavoriteRecord) -> Option<FavoriteRecord> {
+    let item = self
+      .favorites
+      .iter_mut()
+      .find(|item| item.record.skill_id == skill_id)?;
+    item.record.updated_at = item.record.updated_at.max(server.updated_at + 1);
+    item.pending = true;
+    Some(item.record.clone())
+  }
+
   /// Reverts a pushed add that the server rejected. A newer local change stays.
   pub fn revert(&mut self, rejected: &FavoriteRecord) {
     self.favorites.retain(|item| {
       item.record.skill_id != rejected.skill_id || item.record.updated_at != rejected.updated_at
     });
+  }
+
+  /// Drops all removals. Used before the first sync with an account: a removal made without
+  /// that account must not remove a favorite of the account.
+  pub fn drop_removals(&mut self) {
+    self.favorites.retain(|item| item.record.favorited);
+  }
+
+  /// Takes the records of `current` that changed after `start`: local changes made while a
+  /// sync of `start` ran. They are newer than the sync result and stay pending.
+  pub fn keep_local_changes(&mut self, start: &FavoriteStore, current: &FavoriteStore) {
+    for item in &current.favorites {
+      if start.find(&item.record.skill_id) == Some(item) {
+        continue;
+      }
+      let index = self
+        .favorites
+        .iter()
+        .position(|kept| kept.record.skill_id == item.record.skill_id);
+      match index {
+        Some(index) => self.favorites[index] = item.clone(),
+        None => self.favorites.push(item.clone()),
+      }
+    }
   }
 
   /// Prepares the records for a signed-in account. For the same account the pending changes
@@ -163,6 +202,7 @@ impl FavoriteStore {
     }
     self.account_id = Some(account_id.to_string());
     self.cursor = None;
+    self.merging = true;
     for item in &mut self.favorites {
       item.pending = true;
     }

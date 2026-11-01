@@ -6,7 +6,14 @@
 //! API of the server.
 
 use crate::models::{FavoriteRecord, FavoriteStore};
+use crate::services::account_service::{AccountError, AccountManager, AccountServer, SecretStore};
+use crate::services::favorites_service;
 use std::future::Future;
+use std::path::PathBuf;
+use std::time::Duration;
+
+/// The server accepts at most this many changes in one push.
+pub const PUSH_LIMIT: usize = 500;
 
 /// Why the server did not apply a pushed change.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,11 +26,14 @@ pub enum RejectReason {
 /// Result of one pushed change, in push order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushResult {
-  /// The record the server keeps after last write wins.
+  /// The record the server keeps after last write wins: the pushed change when the server
+  /// applied it, else the stored record that is as new or newer.
   Applied(FavoriteRecord),
   Rejected {
     skill_id: String,
     reason: RejectReason,
+    /// The record the server keeps, if it has one.
+    record: Option<FavoriteRecord>,
   },
 }
 
@@ -44,6 +54,7 @@ pub enum SyncError {
 }
 
 pub trait FavoriteServer {
+  /// Pushes at most `PUSH_LIMIT` changes.
   fn push(
     &self,
     changes: &[FavoriteRecord],
@@ -67,21 +78,7 @@ pub async fn sync(
 ) -> Result<SyncReport, SyncError> {
   let mut report = SyncReport::default();
 
-  let changes = store.pending();
-  if !changes.is_empty() {
-    let results = server.push(&changes).await?;
-    for result in results {
-      match result {
-        PushResult::Applied(record) => store.apply(record),
-        PushResult::Rejected { skill_id, reason } => {
-          if let Some(change) = changes.iter().find(|change| change.skill_id == skill_id) {
-            store.revert(change);
-          }
-          report.rejected.push((skill_id, reason));
-        },
-      }
-    }
-  }
+  push(store, server, &mut report).await?;
 
   loop {
     let page = server.pull(store.cursor.as_deref()).await?;
@@ -98,7 +95,153 @@ pub async fn sync(
     }
   }
 
+  store.merging = false;
   Ok(report)
+}
+
+/// Pushes the pending changes in batches, removals first, so a removal frees its place
+/// before an add needs it. During the first sync with an account, local favorites merge as a
+/// union: local removals are dropped and not pushed, and a local favorite that a newer
+/// account removal beats is pushed once more with a later time, so it stays.
+async fn push(
+  store: &mut FavoriteStore,
+  server: &impl FavoriteServer,
+  report: &mut SyncReport,
+) -> Result<(), SyncError> {
+  let mut merging = store.merging;
+  if merging {
+    store.drop_removals();
+  }
+  let mut changes = store.pending();
+  while !changes.is_empty() {
+    changes.sort_by_key(|change| change.favorited);
+    let mut again = Vec::new();
+    for batch in changes.chunks(PUSH_LIMIT) {
+      for result in server.push(batch).await? {
+        match result {
+          PushResult::Applied(record) => {
+            let pushed = batch
+              .iter()
+              .find(|change| change.skill_id == record.skill_id);
+            let beaten_add = pushed.is_some_and(|change| change.favorited && !record.favorited);
+            if merging && beaten_add {
+              again.extend(store.outdate(&record.skill_id, &record));
+            } else {
+              store.apply(record);
+            }
+          },
+          PushResult::Rejected {
+            skill_id,
+            reason,
+            record,
+          } => {
+            if let Some(change) = batch.iter().find(|change| change.skill_id == skill_id) {
+              store.revert(change);
+            }
+            if let Some(record) = record {
+              store.apply(record);
+            }
+            report.rejected.push((skill_id, reason));
+          },
+        }
+      }
+    }
+    // A second removal that beats the new time is a newer change; it wins.
+    merging = false;
+    changes = again;
+  }
+  Ok(())
+}
+
+/// Syncs the favorite store file with the signed-in account, one sync at a time, so a
+/// sign-out or an account deletion cannot clear the store while a sync runs.
+pub struct FavoriteSync {
+  path: PathBuf,
+  running: tokio::sync::Mutex<()>,
+}
+
+impl FavoriteSync {
+  pub fn new(path: PathBuf) -> Self {
+    Self {
+      path,
+      running: tokio::sync::Mutex::new(()),
+    }
+  }
+
+  /// Runs one sync. `None` when no account is signed in. Local changes made while it runs
+  /// stay pending for the next sync.
+  pub async fn run<S, K>(
+    &self,
+    account: &AccountManager<S, K>,
+    server: &impl FavoriteServer,
+  ) -> Result<Option<SyncReport>, SyncError>
+  where
+    S: AccountServer,
+    K: SecretStore,
+  {
+    let _running = self.running.lock().await;
+    self.run_locked(account, server).await
+  }
+
+  /// Pushes the pending changes within `limit` (best effort), then signs out, which clears
+  /// the favorites of this device. `limit` includes the wait for a running sync.
+  pub async fn sign_out<S, K>(
+    &self,
+    account: &AccountManager<S, K>,
+    server: &impl FavoriteServer,
+    limit: Duration,
+  ) -> Result<(), String>
+  where
+    S: AccountServer,
+    K: SecretStore,
+  {
+    let pushed = tokio::time::timeout(limit, async {
+      let _running = self.running.lock().await;
+      self.run_locked(account, server).await
+    })
+    .await;
+    match pushed {
+      Ok(Ok(_)) => {},
+      Ok(Err(error)) => tracing::warn!("Favorite sync before sign-out failed: {error:?}"),
+      Err(_) => tracing::warn!("Favorite sync before sign-out timed out"),
+    }
+    // The clear must not race the write-back of a sync.
+    let _running = self.running.lock().await;
+    account.sign_out().await
+  }
+
+  /// Deletes the account without a push first; its favorites are deleted with it.
+  pub async fn delete_account<S, K>(
+    &self,
+    account: &AccountManager<S, K>,
+  ) -> Result<(), AccountError>
+  where
+    S: AccountServer,
+    K: SecretStore,
+  {
+    let _running = self.running.lock().await;
+    account.delete_account().await
+  }
+
+  async fn run_locked<S, K>(
+    &self,
+    account: &AccountManager<S, K>,
+    server: &impl FavoriteServer,
+  ) -> Result<Option<SyncReport>, SyncError>
+  where
+    S: AccountServer,
+    K: SecretStore,
+  {
+    let Some(identity) = account.status().await.identity else {
+      return Ok(None);
+    };
+    let start = favorites_service::read_store(&self.path).map_err(SyncError::Failed)?;
+    let mut store = start.store.clone();
+    store.begin_account(&identity.account_id);
+    let result = sync(&mut store, server).await;
+    favorites_service::save_synced(&self.path, &start, store).map_err(SyncError::Failed)?;
+    result.map(Some)
+  }
 }
 
 #[cfg(test)]
@@ -209,6 +352,7 @@ mod tests {
                 return PushResult::Rejected {
                   skill_id: change.skill_id.clone(),
                   reason: RejectReason::LimitReached,
+                  record: None,
                 };
               }
               PushResult::Applied(state.store(change.clone()))
@@ -298,8 +442,9 @@ mod tests {
   #[test]
   fn a_later_server_write_wins_over_an_earlier_local_change() {
     let server = FakeServer::new();
-    server.write(record("1", false, 20));
     let mut store = signed_in();
+    run(&mut store, &server).unwrap();
+    server.write(record("1", false, 20));
     add(&mut store, "1", 10);
     run(&mut store, &server).unwrap();
     assert!(ids(&store).is_empty());
@@ -377,6 +522,122 @@ mod tests {
     assert_eq!(list, ["local", "remote"]);
     assert!(server.get("local").unwrap().favorited);
     assert_eq!(server.with(|state| state.pulls[0].clone()), None);
+  }
+
+  #[test]
+  fn first_sign_in_keeps_a_local_favorite_over_a_newer_account_tombstone() {
+    let server = FakeServer::new();
+    server.write(record("1", false, 20));
+    let mut store = FavoriteStore::default();
+    add(&mut store, "1", 10);
+
+    store.begin_account("account-1");
+    run(&mut store, &server).unwrap();
+
+    assert_eq!(ids(&store), ["1"]);
+    assert!(store.pending().is_empty());
+    let stored = server.get("1").unwrap();
+    assert!(stored.favorited);
+    assert!(stored.updated_at > 20);
+    assert_eq!(store.find("1").unwrap().record, stored);
+
+    // After the first sync, a later removal on another device wins again.
+    server.write(record("1", false, stored.updated_at + 1));
+    run(&mut store, &server).unwrap();
+    assert!(ids(&store).is_empty());
+  }
+
+  #[test]
+  fn pushes_send_at_most_the_push_limit_per_request() {
+    let server = FakeServer::new();
+    server.with(|state| state.page_size = 2_000);
+    let mut store = signed_in();
+    run(&mut store, &server).unwrap();
+    for id in 0..PUSH_LIMIT + 1 {
+      add(&mut store, &id.to_string(), 10);
+    }
+    // The fake limit is 3 favorites; removals are not limited.
+    for id in 0..PUSH_LIMIT + 1 {
+      store.set(&id.to_string(), false, None, 20).unwrap();
+    }
+    run(&mut store, &server).unwrap();
+    let sizes: Vec<_> = server.with(|state| state.pushes.iter().map(Vec::len).collect());
+    assert_eq!(sizes, [PUSH_LIMIT, 1]);
+    assert!(store.pending().is_empty());
+  }
+
+  #[test]
+  fn a_rejected_change_takes_the_record_the_server_keeps() {
+    struct Rejecting;
+    impl FavoriteServer for Rejecting {
+      async fn push(&self, changes: &[FavoriteRecord]) -> Result<Vec<PushResult>, SyncError> {
+        Ok(
+          changes
+            .iter()
+            .map(|change| PushResult::Rejected {
+              skill_id: change.skill_id.clone(),
+              reason: RejectReason::Other("invalid".to_string()),
+              record: Some(record(&change.skill_id, true, 5)),
+            })
+            .collect(),
+        )
+      }
+      async fn pull(&self, cursor: Option<&str>) -> Result<PullPage, SyncError> {
+        Ok(PullPage {
+          records: Vec::new(),
+          cursor: cursor.map(str::to_string),
+          has_more: false,
+        })
+      }
+    }
+    let mut store = signed_in();
+    add(&mut store, "1", 10);
+    let report = tokio::runtime::Builder::new_current_thread()
+      .build()
+      .unwrap()
+      .block_on(sync(&mut store, &Rejecting))
+      .unwrap();
+    assert_eq!(
+      report.rejected,
+      [("1".to_string(), RejectReason::Other("invalid".to_string()))]
+    );
+    assert_eq!(store.find("1").unwrap().record, record("1", true, 5));
+    assert!(store.pending().is_empty());
+  }
+
+  #[test]
+  fn first_sign_in_does_not_push_a_local_removal_over_an_account_favorite() {
+    let server = FakeServer::new();
+    server.write(record("42", true, 5));
+    let mut store = FavoriteStore::default();
+    add(&mut store, "42", 10);
+    store.set("42", false, None, 20).unwrap();
+
+    store.begin_account("account-1");
+    run(&mut store, &server).unwrap();
+
+    assert_eq!(server.get("42"), Some(record("42", true, 5)));
+    assert!(server.with(|state| state.pushes.is_empty()));
+    assert_eq!(ids(&store), ["42"]);
+  }
+
+  #[test]
+  fn removals_push_before_adds() {
+    let server = FakeServer::new();
+    let mut store = signed_in();
+    run(&mut store, &server).unwrap();
+    add(&mut store, "x", 10);
+    for id in 0..PUSH_LIMIT {
+      add(&mut store, &id.to_string(), 10);
+      store.set(&id.to_string(), false, None, 20).unwrap();
+    }
+
+    run(&mut store, &server).unwrap();
+
+    let pushes = server.with(|state| state.pushes.clone());
+    assert_eq!(pushes.len(), 2);
+    assert!(pushes[0].iter().all(|change| !change.favorited));
+    assert_eq!(pushes[1], [store.find("x").unwrap().record.clone()]);
   }
 
   #[test]
@@ -467,5 +728,140 @@ mod tests {
     store.apply(record("1", false, 5));
     assert!(store.find("1").unwrap().pending);
     assert_eq!(ids(&store), ["1"]);
+  }
+
+  mod store_sync {
+    use super::*;
+    use crate::services::favorite_api_service::tests::signed_in as account;
+    use std::sync::atomic::Ordering;
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+      tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+    }
+
+    #[test]
+    fn a_sync_binds_the_store_to_the_account_and_saves_the_result() {
+      let dir = tempfile::tempdir().unwrap();
+      let path = dir.path().join("favorites.json");
+      favorites_service::update_store_for_tests(&path, |store| {
+        add(store, "1", 10);
+      });
+      let (account, _, _) = account(path.clone());
+      let server = FakeServer::new();
+      server.write(record("2", true, 5));
+
+      let report = block_on(FavoriteSync::new(path.clone()).run(&account, &server)).unwrap();
+
+      assert_eq!(report, Some(SyncReport::default()));
+      assert!(server.get("1").unwrap().favorited);
+      let saved = favorites_service::load_store(&path).unwrap();
+      assert_eq!(saved.account_id.as_deref(), Some("12"));
+      assert!(saved.pending().is_empty());
+      assert_eq!(saved.list().len(), 2);
+    }
+
+    #[test]
+    fn no_sync_runs_while_signed_out() {
+      let dir = tempfile::tempdir().unwrap();
+      let path = dir.path().join("favorites.json");
+      let (account, _, _) = account(path.clone());
+      block_on(account.sign_out()).unwrap();
+      let server = FakeServer::new();
+      let report = block_on(FavoriteSync::new(path).run(&account, &server)).unwrap();
+      assert_eq!(report, None);
+      assert!(server.with(|state| state.pulls.is_empty()));
+    }
+
+    #[test]
+    fn a_favorite_added_just_before_sign_out_is_on_the_server_after_it() {
+      let dir = tempfile::tempdir().unwrap();
+      let path = dir.path().join("favorites.json");
+      let (account, sessions, _) = account(path.clone());
+      let server = FakeServer::new();
+      let sync = FavoriteSync::new(path.clone());
+      block_on(sync.run(&account, &server)).unwrap();
+      favorites_service::update_store_for_tests(&path, |store| {
+        add(store, "1", 10);
+      });
+
+      block_on(sync.sign_out(&account, &server, Duration::from_secs(5))).unwrap();
+
+      assert!(server.get("1").unwrap().favorited);
+      assert!(sessions.signed_out.load(Ordering::SeqCst));
+      assert_eq!(block_on(account.status()).identity, None);
+      assert_eq!(
+        favorites_service::load_store(&path).unwrap(),
+        FavoriteStore::default()
+      );
+    }
+
+    #[test]
+    fn sign_out_finishes_when_the_server_is_unreachable() {
+      let dir = tempfile::tempdir().unwrap();
+      let path = dir.path().join("favorites.json");
+      let (account, _, _) = account(path.clone());
+      let server = FakeServer::new();
+      server.with(|state| state.offline = true);
+      favorites_service::update_store_for_tests(&path, |store| {
+        add(store, "1", 10);
+      });
+      block_on(FavoriteSync::new(path.clone()).sign_out(&account, &server, Duration::from_secs(5)))
+        .unwrap();
+      assert_eq!(block_on(account.status()).identity, None);
+      assert!(!path.exists());
+    }
+
+    #[test]
+    fn the_sign_out_limit_includes_the_wait_for_a_running_sync() {
+      let dir = tempfile::tempdir().unwrap();
+      let path = dir.path().join("favorites.json");
+      let (account, _, _) = account(path.clone());
+      let server = FakeServer::new();
+      favorites_service::update_store_for_tests(&path, |store| {
+        add(store, "1", 10);
+      });
+      let sync = std::sync::Arc::new(FavoriteSync::new(path.clone()));
+
+      block_on(async {
+        // Another sync holds the lock for longer than the limit.
+        let (locked, is_locked) = tokio::sync::oneshot::channel();
+        let holder = sync.clone();
+        tokio::spawn(async move {
+          let _running = holder.running.lock().await;
+          locked.send(()).unwrap();
+          tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        is_locked.await.unwrap();
+        sync
+          .sign_out(&account, &server, Duration::from_millis(50))
+          .await
+          .unwrap();
+      });
+
+      // No push after the limit, and the clear waited for the running sync.
+      assert!(server.get("1").is_none());
+      assert_eq!(block_on(account.status()).identity, None);
+      assert!(!path.exists());
+    }
+
+    #[test]
+    fn account_deletion_clears_the_store_without_a_push() {
+      let dir = tempfile::tempdir().unwrap();
+      let path = dir.path().join("favorites.json");
+      let (account, sessions, _) = account(path.clone());
+      favorites_service::update_store_for_tests(&path, |store| {
+        add(store, "1", 10);
+      });
+
+      block_on(FavoriteSync::new(path.clone()).delete_account(&account)).unwrap();
+
+      assert!(sessions.deleted.load(Ordering::SeqCst));
+      assert_eq!(block_on(account.status()).identity, None);
+      assert!(!path.exists());
+    }
   }
 }

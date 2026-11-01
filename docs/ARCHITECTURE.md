@@ -283,7 +283,7 @@ Item scope and devices (ADR 0004, "Edits and scope changes" and "Devices"):
   becomes shared, goes to another device or is deleted, then its device file is deleted.
   This computer cannot remove itself.
 
-## Favorites (`favorites_service`, `favorite_sync_service`)
+## Favorites (`favorites_service`, `favorite_sync_service`, `favorite_api_service`)
 
 A favorite is a marketplace skill, keyed by its marketplace id. `favorites.json` holds one
 record per skill: favorite state, `updatedAt` (client milliseconds), a snapshot (name,
@@ -292,13 +292,35 @@ stays as a pending tombstone until a sync confirms it. Favorites work without an
 the Marketplace has a Favorites view and a heart toggle in the list and the detail page. A
 favorite whose skill lookup returns 404 shows as unavailable from its snapshot.
 
-`favorite_sync_service::sync` pushes pending records, then pulls from the stored cursor
-until the server has no more pages. A server record replaces the local one unless a newer
-local change is still pending (last write wins on `updatedAt`). A rejected add (limit) is
-reverted and reported. `Unauthorized` leaves the records as they are. `begin_account`
-marks all records pending and clears the cursor when the account changes, so the first
-sign-in merges local favorites as a union. The engine talks to the server through the
-`FavoriteServer` trait; its HTTP client waits for favorite sync (#68).
+`favorite_sync_service::sync` pushes pending records, removals first, in batches of at
+most 500, then pulls from the stored cursor until the server has no more pages. A server record replaces
+the local one unless a newer local change is still pending (last write wins on
+`updatedAt`). A rejected change is reverted and reported, and takes the record the server
+returns, if any. `Unauthorized` leaves the records as they are. `begin_account` marks all
+records pending, clears the cursor and sets `merging` when the account changes, so the
+first sign-in merges local favorites as a union: while `merging`, local tombstones are
+dropped and not pushed, and a local favorite that a newer account tombstone beats is pushed
+again with a later `updatedAt` and stays.
+
+The engine talks to the server through the `FavoriteServer` trait.
+`favorite_api_service::FavoriteApi` implements it over `/api/account/favorites` with the
+API key and the bearer token of `AccountManager`; a `401` calls `refresh_rejected` once
+and retries, and a refresh that the server rejects gives `Unauthorized`. It maps the
+contract: integer `skill_id`, ISO 8601 `updated_at` from local milliseconds, `state`
+`favorited` or `removed`, `snapshot` only for an add, pull `favorites`, `cursor` and
+`has_more`; `applied` and `ignored` both return the record the server keeps.
+
+`FavoriteSync` runs one sync at a time on `favorites.json`, only while signed in. It
+syncs a copy without the store lock and then keeps the local changes made meanwhile; it
+does not write back when the store was cleared (a clear counter per file, kept under the
+store lock) or bound to another account during the sync. Its `sign_out` pushes pending
+changes (5 seconds at most, including the wait for a running sync) and then, holding the
+sync lock, calls `AccountManager::sign_out`, which clears the store. Its `delete_account`
+takes the sync lock and calls `AccountManager::delete_account` without a push. The app (`src-tauri/src/favorite_sync.rs`) syncs at start, after a
+sign-in, on window focus (1 second) and after `set_favorite` (2 seconds); a newer request
+replaces a waiting one. A failed sync retries after 60 seconds; `Unauthorized` sends
+`account://changed`. Each sync sends `favorites://synced` (`limitReached`, `rejected`),
+and the frontend reloads the list and shows a message for each kind of rejection.
 
 ## Account (`account_service`)
 

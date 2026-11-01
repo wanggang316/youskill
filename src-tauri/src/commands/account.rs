@@ -30,12 +30,13 @@ pub fn account_sign_in(
   account.begin_sign_in(provider)
 }
 
+/// Pushes pending favorite changes (best effort), then signs out and clears the favorites.
 #[tauri::command]
 pub async fn account_sign_out(
   app: AppHandle,
   account: State<'_, Account>,
 ) -> Result<AccountStatus, String> {
-  account.sign_out().await?;
+  crate::favorite_sync::sign_out(&app).await?;
   emit_changed(&app, None).await;
   Ok(account.status().await)
 }
@@ -43,8 +44,11 @@ pub async fn account_sign_out(
 /// Deletes the account on the server and the account data of this device. The result has the
 /// status after the attempt and the failure to show, if any.
 #[tauri::command]
-pub async fn account_delete(account: State<'_, Account>) -> Result<AccountChanged, String> {
-  let error = match account.delete_account().await {
+pub async fn account_delete(
+  app: AppHandle,
+  account: State<'_, Account>,
+) -> Result<AccountChanged, String> {
+  let error = match crate::favorite_sync::delete_account(&app).await {
     Ok(()) => None,
     Err(AccountError::SignedOut) => {
       Some("The session ended. Sign in again to delete the account.".to_string())
