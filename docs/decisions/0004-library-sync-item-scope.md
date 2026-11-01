@@ -50,7 +50,7 @@ Library sync does not use git merges. Each layout needs the per-item three-way c
 
 ### Delivery
 
-- Fine-grained restore (issue #60) merges first. This layout uses its preview, checkpoint and undo.
+- This layout builds on fine-grained restore ([#60](https://github.com/wanggang316/youskill/issues/60)) and uses its preview, checkpoint and undo.
 - Step 1: layout version 2, device files, migration, the backup on a moved head, and the scope field. All items are shared, and the UI has no scope control.
 - Step 2: scope changes on items, device management (name, take over, remove, copy installs), and copies of device-only items from other devices.
 
