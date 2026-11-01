@@ -11,6 +11,7 @@
     Check,
     ChevronDown,
     ArrowDownWideNarrow,
+    Heart,
     Loader2,
     RefreshCw,
     Search,
@@ -29,6 +30,7 @@
     type SkillSource,
   } from "$lib/api";
   import { hubSkills, refreshHub } from "$lib/stores/hub";
+  import { favorites, favoritesState, filterFavorites } from "$lib/stores/favorites";
   import { marketplace, marketState, type MarketTab } from "$lib/stores/market";
   import { openInstallModal, performAction } from "$lib/stores/modals";
   import { buildMarketHref } from "$lib/navigation/app-shell";
@@ -37,11 +39,16 @@
   let log = $state("");
   let viewport = $state<HTMLElement | null>(null);
   let searchTimeout = $state<ReturnType<typeof setTimeout> | null>(null);
+  const showingFavorites = $derived($marketState.view === "favorites");
+  const favoriteIds = $derived(new Set($favoritesState.items.map((item) => item.skillId)));
+  const shownFavorites = $derived(filterFavorites($favoritesState.items, $marketState.query));
   const title = $derived(
-    $marketState.tab === "categories"
-      ? ($marketState.categories.find((item) => item.id === $marketState.categoryId)?.name ??
+    showingFavorites
+      ? $t("market.favorites")
+      : $marketState.tab === "categories"
+        ? ($marketState.categories.find((item) => item.id === $marketState.categoryId)?.name ??
           $t("market.all"))
-      : ($marketState.repository ?? $t("market.repositories"))
+        : ($marketState.repository ?? $t("market.repositories"))
   );
   const repositoryStars = $derived(
     $marketState.repositories.find((item) => item.name === $marketState.repository)?.star_count
@@ -55,12 +62,15 @@
       ? $marketState.categoriesError
       : $marketState.repositoriesError
   );
-  const noRepository = $derived($marketState.tab === "repositories" && !$marketState.repository);
+  const noRepository = $derived(
+    !showingFavorites && $marketState.tab === "repositories" && !$marketState.repository
+  );
   /** Marketplace id of the skill shown in the content panel (`?skill=`). */
   const detailId = $derived(page.url.searchParams.get("skill"));
 
   onMount(() => {
     void marketplace.initialize();
+    if (!$favoritesState.loaded) void favorites.load();
   });
   // The list remounts when the detail closes; put it back where the user left it.
   $effect(() => {
@@ -161,8 +171,13 @@
     }
   }
 
-  function handleView(skill: RemoteSkill) {
-    goto(buildMarketHref(skill.id));
+  function handleView(skillId: string) {
+    goto(buildMarketHref(skillId));
+  }
+
+  function refresh() {
+    if (showingFavorites) void favorites.load();
+    run(() => marketplace.refresh());
   }
 </script>
 
@@ -174,6 +189,21 @@
           {$t("market.title")}
         </h1>
       </header>
+      <div class="px-3 pb-2">
+        <button
+          type="button"
+          class="market-nav-row"
+          class:active={showingFavorites}
+          aria-current={showingFavorites ? "true" : undefined}
+          onclick={() => run(() => marketplace.showFavorites())}
+        >
+          <Heart size={16} class="shrink-0" aria-hidden="true" />
+          <span class="min-w-0 flex-1">{$t("market.favorites")}</span>
+          <span class="text-base-content-subtle shrink-0 text-xs tabular-nums"
+            >{$favoritesState.items.length}</span
+          >
+        </button>
+      </div>
       <div class="px-3 pb-3">
         <SegmentedTabs
           items={[
@@ -197,8 +227,10 @@
           <button
             type="button"
             class="market-nav-row"
-            class:active={$marketState.categoryId === null}
-            aria-current={$marketState.categoryId === null ? "true" : undefined}
+            class:active={!showingFavorites && $marketState.categoryId === null}
+            aria-current={!showingFavorites && $marketState.categoryId === null
+              ? "true"
+              : undefined}
             onclick={() => run(() => marketplace.selectCategory(null))}
           >
             <CatalogIcon fallback="all" />
@@ -208,8 +240,10 @@
             <button
               type="button"
               class="market-nav-row"
-              class:active={$marketState.categoryId === category.id}
-              aria-current={$marketState.categoryId === category.id ? "true" : undefined}
+              class:active={!showingFavorites && $marketState.categoryId === category.id}
+              aria-current={!showingFavorites && $marketState.categoryId === category.id
+                ? "true"
+                : undefined}
               onclick={() => run(() => marketplace.selectCategory(category.id))}
             >
               <CatalogIcon icon={category.icon} />
@@ -224,8 +258,10 @@
             <button
               type="button"
               class="market-nav-row"
-              class:active={$marketState.repository === repository.name}
-              aria-current={$marketState.repository === repository.name ? "true" : undefined}
+              class:active={!showingFavorites && $marketState.repository === repository.name}
+              aria-current={!showingFavorites && $marketState.repository === repository.name
+                ? "true"
+                : undefined}
               onclick={() => run(() => marketplace.selectRepository(repository.name))}
             >
               <CatalogIcon icon={repository.icon} fallback="repository" />
@@ -273,7 +309,7 @@
         >
           <div class="flex min-w-0 items-center gap-3">
             <h2 class="text-base-content truncate text-sm font-semibold" {title}>{title}</h2>
-            {#if $marketState.tab === "repositories" && repositoryStars != null}
+            {#if !showingFavorites && $marketState.tab === "repositories" && repositoryStars != null}
               <span
                 class="text-base-content-subtle inline-flex shrink-0 items-center gap-1 text-xs tabular-nums"
                 aria-label={`${repositoryStars.toLocaleString()} stars`}
@@ -283,10 +319,13 @@
             {/if}
           </div>
           <span class="text-base-content-subtle shrink-0 text-xs tabular-nums" role="status">
-            {#if $marketState.loading}{$t("market.loading")}{:else if $marketState.loaded}{$t(
-                "library.count",
-                { count: $marketState.total }
-              )}{/if}
+            {#if showingFavorites}{$t("library.count", {
+                count: shownFavorites.length,
+              })}{:else if $marketState.loading}{$t(
+                "market.loading"
+              )}{:else if $marketState.loaded}{$t("library.count", {
+                count: $marketState.total,
+              })}{/if}
           </span>
         </header>
         <div class="border-base-300 flex shrink-0 flex-wrap items-center gap-3 border-b px-6 py-4">
@@ -309,7 +348,7 @@
               class="border-base-300 text-base-content-muted hover:bg-base-200 hover:text-base-content data-[state=open]:bg-base-200 flex size-9 shrink-0 items-center justify-center rounded-lg border transition disabled:opacity-40"
               aria-label={$t("market.sort")}
               title={`${$t("market.sort")}: ${sortItems.find((item) => item.value === $marketState.sortBy)?.label}`}
-              disabled={noRepository}
+              disabled={noRepository || showingFavorites}
             >
               <ArrowDownWideNarrow size={16} />
             </DropdownMenu.Trigger>
@@ -340,7 +379,7 @@
           </DropdownMenu.Root>
           <IconButton
             variant="outline"
-            onclick={() => run(() => marketplace.refresh())}
+            onclick={refresh}
             disabled={$marketState.navigationLoading || $marketState.loading}
             title={$t("library.refresh")}
             ariaLabel={$t("library.refresh")}
@@ -361,103 +400,160 @@
           }}
           aria-busy={$marketState.loading || searchTimeout !== null}
         >
-          {#if $marketState.error}
-            <div class="px-6 py-4 text-sm" role="alert">
-              <p class="text-error">{$marketState.error}</p>
-              <button
-                class="settings-button mt-3"
-                type="button"
-                onclick={() =>
-                  $marketState.skills.length ? marketplace.loadMore() : marketplace.reload()}
-                >{$t("common.retry")}</button
-              >
-            </div>
+          {#if $favoritesState.error}
+            <p class="text-error px-6 pt-4 text-sm" role="alert">{$favoritesState.error}</p>
           {/if}
-          {#if log}<div
-              class="bg-base-200 text-base-content-muted mx-6 mt-4 rounded-lg px-3 py-2 text-xs whitespace-pre-wrap"
-            >
-              {log}
-            </div>{/if}
-          {#if ($marketState.loading || searchTimeout !== null) && !$marketState.skills.length}
-            <div
-              class="text-base-content-muted flex items-center justify-center gap-2 p-12 text-sm"
-              role="status"
-            >
-              <Loader2 size={16} class="animate-spin" />{$t("market.loading")}
-            </div>
-          {:else if noRepository}
-            <p class="text-base-content-muted p-12 text-center text-sm">
-              {$t($marketState.navigationLoading ? "market.loading" : "market.repositories.empty")}
-            </p>
-          {:else if !$marketState.skills.length && !$marketState.error}
-            <p class="text-base-content-muted p-12 text-center text-sm">{$t("market.empty")}</p>
-          {:else}
-            <ul class="divide-base-300 divide-y px-6">
-              {#each $marketState.skills as skill (skill.id)}
-                {@const inHub = Boolean(hubEntry(skill))}
-                <li class="hover:bg-base-200 flex items-center gap-4 py-4 transition-colors">
-                  <button
-                    type="button"
-                    class="focus-visible:outline-primary min-w-0 flex-1 rounded text-left"
-                    onclick={() => handleView(skill)}
-                  >
-                    <span class="flex min-w-0 items-center gap-2">
-                      <span class="text-base-content truncate text-sm font-medium"
-                        >{skill.name}</span
-                      >
-                      {#if inHub}<span
-                          class="text-success inline-flex shrink-0 items-center gap-1 text-xs"
-                          ><Check size={12} />{$t("market.imported")}</span
-                        >{/if}
-                    </span>
-                    {#if $marketState.tab === "categories"}
-                      <span
-                        class="text-base-content-subtle mt-1 flex min-w-0 items-center gap-3 text-xs"
-                      >
-                        <span class="truncate">{skill.source}</span>
-                        <span
-                          class="inline-flex shrink-0 items-center gap-1 tabular-nums"
-                          aria-label={`${skill.star_count.toLocaleString()} stars`}
+          {#if showingFavorites}
+            {#if !shownFavorites.length}
+              <p class="text-base-content-muted p-12 text-center text-sm">
+                {$t($marketState.query.trim() ? "market.empty" : "market.favorites.empty")}
+              </p>
+            {:else}
+              <ul class="divide-base-300 divide-y px-6">
+                {#each shownFavorites as favorite (favorite.skillId)}
+                  {@const unavailable = $favoritesState.unavailable.includes(favorite.skillId)}
+                  <li class="hover:bg-base-200 flex items-center gap-4 py-4 transition-colors">
+                    <button
+                      type="button"
+                      class="focus-visible:outline-primary min-w-0 flex-1 rounded text-left"
+                      onclick={() => handleView(favorite.skillId)}
+                    >
+                      <span class="flex min-w-0 items-center gap-2">
+                        <span class="text-base-content truncate text-sm font-medium"
+                          >{favorite.snapshot.name}</span
                         >
-                          <Star size={12} aria-hidden="true" />{skill.star_count.toLocaleString()}
-                        </span>
+                        {#if unavailable}<span class="text-warning shrink-0 text-xs"
+                            >{$t("market.unavailable")}</span
+                          >{/if}
                       </span>
-                    {/if}
-                    {#if skill.description}<span
-                        class="text-base-content-muted mt-2 line-clamp-2 text-xs leading-relaxed"
-                        >{skill.description}</span
-                      >{/if}
-                  </button>
-                  <button
-                    class="settings-button shrink-0"
-                    onclick={() => handleImport(skill)}
-                    disabled={Boolean(busySkillId)}
-                    type="button"
-                  >
-                    {#if busySkillId === skill.id}<Loader2
-                        size={12}
-                        class="animate-spin"
-                      />{/if}{buttonLabel(skill)}
-                  </button>
-                </li>
-              {/each}
-            </ul>
-          {/if}
-          {#if $marketState.skills.length}
-            <div class="flex justify-center p-6">
-              <button
-                class="settings-button"
-                onclick={() => marketplace.loadMore()}
-                disabled={!$marketState.hasMore || $marketState.loading}
-                type="button"
+                      <span class="text-base-content-subtle mt-1 block truncate text-xs"
+                        >{favorite.snapshot.source}</span
+                      >
+                      {#if favorite.snapshot.description}<span
+                          class="text-base-content-muted mt-2 line-clamp-2 text-xs leading-relaxed"
+                          >{favorite.snapshot.description}</span
+                        >{/if}
+                    </button>
+                    <IconButton
+                      onclick={() => favorites.remove(favorite.skillId)}
+                      title={$t("market.unfavorite")}
+                      class="text-secondary h-8 w-8 shrink-0 p-0"
+                    >
+                      <Heart size={16} fill="currentColor" />
+                    </IconButton>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+          {:else}
+            {#if $marketState.error}
+              <div class="px-6 py-4 text-sm" role="alert">
+                <p class="text-error">{$marketState.error}</p>
+                <button
+                  class="settings-button mt-3"
+                  type="button"
+                  onclick={() =>
+                    $marketState.skills.length ? marketplace.loadMore() : marketplace.reload()}
+                  >{$t("common.retry")}</button
+                >
+              </div>
+            {/if}
+            {#if log}<div
+                class="bg-base-200 text-base-content-muted mx-6 mt-4 rounded-lg px-3 py-2 text-xs whitespace-pre-wrap"
               >
-                {#if $marketState.loading}<Loader2
-                    size={14}
-                    class="animate-spin"
-                  />{:else if $marketState.hasMore}<ChevronDown size={14} />{/if}
-                {$t($marketState.hasMore ? "market.loadMore" : "market.noMore")}
-              </button>
-            </div>
+                {log}
+              </div>{/if}
+            {#if ($marketState.loading || searchTimeout !== null) && !$marketState.skills.length}
+              <div
+                class="text-base-content-muted flex items-center justify-center gap-2 p-12 text-sm"
+                role="status"
+              >
+                <Loader2 size={16} class="animate-spin" />{$t("market.loading")}
+              </div>
+            {:else if noRepository}
+              <p class="text-base-content-muted p-12 text-center text-sm">
+                {$t(
+                  $marketState.navigationLoading ? "market.loading" : "market.repositories.empty"
+                )}
+              </p>
+            {:else if !$marketState.skills.length && !$marketState.error}
+              <p class="text-base-content-muted p-12 text-center text-sm">{$t("market.empty")}</p>
+            {:else}
+              <ul class="divide-base-300 divide-y px-6">
+                {#each $marketState.skills as skill (skill.id)}
+                  {@const inHub = Boolean(hubEntry(skill))}
+                  {@const favorite = favoriteIds.has(skill.id)}
+                  <li class="hover:bg-base-200 flex items-center gap-4 py-4 transition-colors">
+                    <button
+                      type="button"
+                      class="focus-visible:outline-primary min-w-0 flex-1 rounded text-left"
+                      onclick={() => handleView(skill.id)}
+                    >
+                      <span class="flex min-w-0 items-center gap-2">
+                        <span class="text-base-content truncate text-sm font-medium"
+                          >{skill.name}</span
+                        >
+                        {#if inHub}<span
+                            class="text-success inline-flex shrink-0 items-center gap-1 text-xs"
+                            ><Check size={12} />{$t("market.imported")}</span
+                          >{/if}
+                      </span>
+                      {#if $marketState.tab === "categories"}
+                        <span
+                          class="text-base-content-subtle mt-1 flex min-w-0 items-center gap-3 text-xs"
+                        >
+                          <span class="truncate">{skill.source}</span>
+                          <span
+                            class="inline-flex shrink-0 items-center gap-1 tabular-nums"
+                            aria-label={`${skill.star_count.toLocaleString()} stars`}
+                          >
+                            <Star size={12} aria-hidden="true" />{skill.star_count.toLocaleString()}
+                          </span>
+                        </span>
+                      {/if}
+                      {#if skill.description}<span
+                          class="text-base-content-muted mt-2 line-clamp-2 text-xs leading-relaxed"
+                          >{skill.description}</span
+                        >{/if}
+                    </button>
+                    <IconButton
+                      onclick={() => favorites.toggle(skill)}
+                      title={$t(favorite ? "market.unfavorite" : "market.favorite")}
+                      class={`h-8 w-8 shrink-0 p-0 ${favorite ? "text-secondary" : "text-base-content-subtle"}`}
+                    >
+                      <Heart size={16} fill={favorite ? "currentColor" : "none"} />
+                    </IconButton>
+                    <button
+                      class="settings-button shrink-0"
+                      onclick={() => handleImport(skill)}
+                      disabled={Boolean(busySkillId)}
+                      type="button"
+                    >
+                      {#if busySkillId === skill.id}<Loader2
+                          size={12}
+                          class="animate-spin"
+                        />{/if}{buttonLabel(skill)}
+                    </button>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
+            {#if $marketState.skills.length}
+              <div class="flex justify-center p-6">
+                <button
+                  class="settings-button"
+                  onclick={() => marketplace.loadMore()}
+                  disabled={!$marketState.hasMore || $marketState.loading}
+                  type="button"
+                >
+                  {#if $marketState.loading}<Loader2
+                      size={14}
+                      class="animate-spin"
+                    />{:else if $marketState.hasMore}<ChevronDown size={14} />{/if}
+                  {$t($marketState.hasMore ? "market.loadMore" : "market.noMore")}
+                </button>
+              </div>
+            {/if}
           {/if}
         </main>
       </div>

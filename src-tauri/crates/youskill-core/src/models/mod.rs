@@ -1,10 +1,12 @@
 pub mod agent_app;
+pub mod favorite;
 pub mod instruction;
 pub mod scan_root;
 pub mod skill;
 pub mod user_project;
 
 pub use agent_app::{AgentApp, MemoryFile};
+pub use favorite::{FavoriteRecord, FavoriteSnapshot, FavoriteStore, LocalFavorite};
 pub use instruction::{
   AgentFileTemplate, AgentFileView, DetectedInstruction, InstructionActionResult,
   InstructionImportItem, InstructionImportOutcome, InstructionLockFile, InstructionRecord,
