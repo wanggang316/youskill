@@ -84,6 +84,26 @@ The local copy of the lock files, sync state and changed hub files taken before 
 Undo puts it back; the repository is not changed.
 _Avoid_: Snapshot, backup
 
+**Device**:
+One computer connected to the library sync repository. It has a random device id and a
+device file with its installs. The device name is for display only (see
+`docs/decisions/0004-library-sync-item-scope.md`).
+_Avoid_: Machine, host
+
+**Item scope**:
+Which devices get a library item: shared (every device) or device-only (one device).
+Device-only is not private: every reader of the repository can read it.
+_Avoid_: Visibility, privacy
+
+**Shared item**:
+A library item with the shared scope. Each device gets it. Its record has no installs.
+_Avoid_: Common item, main item
+
+**Device-only item**:
+A library item with the scope of one device. Only that device gets it and only that device
+can change its scope or remove it.
+_Avoid_: Local item, private item
+
 ### Favorites
 
 **Favorite**:
