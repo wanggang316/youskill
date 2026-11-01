@@ -32,6 +32,21 @@ pub fn set_favorite(
   })
 }
 
+/// Deletes all favorite records, the account binding and the sync cursor of this device.
+pub(crate) fn clear_store(path: &Path) -> Result<(), String> {
+  let _guard = lock()?;
+  if path.exists() {
+    fs::remove_file(path).map_err(|e| e.to_string())?;
+  }
+  Ok(())
+}
+
+/// Path of the favorite store in the app config directory.
+pub fn store_path() -> Result<PathBuf, String> {
+  let config_dir = dirs_next::config_dir().ok_or("Unable to get config directory")?;
+  Ok(config_dir.join("youskill").join("favorites.json"))
+}
+
 fn lock() -> Result<std::sync::MutexGuard<'static, ()>, String> {
   STORE_LOCK
     .lock()
@@ -47,11 +62,6 @@ fn update_store(
     save_store(path, &store)?;
   }
   Ok(store.list())
-}
-
-fn store_path() -> Result<PathBuf, String> {
-  let config_dir = dirs_next::config_dir().ok_or("Unable to get config directory")?;
-  Ok(config_dir.join("youskill").join("favorites.json"))
 }
 
 pub(crate) fn load_store(path: &Path) -> Result<FavoriteStore, String> {

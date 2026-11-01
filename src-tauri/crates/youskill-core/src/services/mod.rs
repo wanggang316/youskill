@@ -1,6 +1,7 @@
 // Services module - business logic layer
 // Commands should only handle Tauri API and delegate to services
 
+pub mod account_service;
 pub mod agent_apps_service;
 pub mod ai_service;
 pub mod avatar_service;

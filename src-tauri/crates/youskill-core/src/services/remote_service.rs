@@ -3,8 +3,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-const API_KEY: &str = "4586a151c7950fa482a099dfa916ff9d616d02d9f10e710c31819607aabb9fff";
-const API_BASE_URL: &str = "https://api.youskill.cc";
+pub(crate) const API_KEY: &str = "4586a151c7950fa482a099dfa916ff9d616d02d9f10e710c31819607aabb9fff";
+pub(crate) const API_BASE_URL: &str = "https://api.youskill.cc";
 
 #[derive(Debug, Deserialize)]
 struct SkillsResponse {
