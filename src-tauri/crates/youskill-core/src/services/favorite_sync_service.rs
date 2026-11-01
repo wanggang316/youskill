@@ -6,7 +6,7 @@
 //! API of the server.
 
 use crate::models::{FavoriteRecord, FavoriteStore};
-use crate::services::account_service::{AccountManager, AccountServer, SecretStore};
+use crate::services::account_service::{AccountError, AccountManager, AccountServer, SecretStore};
 use crate::services::favorites_service;
 use std::future::Future;
 use std::path::PathBuf;
@@ -154,7 +154,7 @@ async fn push(
 }
 
 /// Syncs the favorite store file with the signed-in account, one sync at a time, so a
-/// sign-out cannot clear the store while a sync runs.
+/// sign-out or an account deletion cannot clear the store while a sync runs.
 pub struct FavoriteSync {
   path: PathBuf,
   running: tokio::sync::Mutex<()>,
@@ -184,7 +184,7 @@ impl FavoriteSync {
   }
 
   /// Pushes the pending changes within `limit` (best effort), then signs out, which clears
-  /// the favorites of this device.
+  /// the favorites of this device. `limit` includes the wait for a running sync.
   pub async fn sign_out<S, K>(
     &self,
     account: &AccountManager<S, K>,
@@ -195,13 +195,32 @@ impl FavoriteSync {
     S: AccountServer,
     K: SecretStore,
   {
-    let _running = self.running.lock().await;
-    match tokio::time::timeout(limit, self.run_locked(account, server)).await {
+    let pushed = tokio::time::timeout(limit, async {
+      let _running = self.running.lock().await;
+      self.run_locked(account, server).await
+    })
+    .await;
+    match pushed {
       Ok(Ok(_)) => {},
       Ok(Err(error)) => tracing::warn!("Favorite sync before sign-out failed: {error:?}"),
       Err(_) => tracing::warn!("Favorite sync before sign-out timed out"),
     }
+    // The clear must not race the write-back of a sync.
+    let _running = self.running.lock().await;
     account.sign_out().await
+  }
+
+  /// Deletes the account without a push first; its favorites are deleted with it.
+  pub async fn delete_account<S, K>(
+    &self,
+    account: &AccountManager<S, K>,
+  ) -> Result<(), AccountError>
+  where
+    S: AccountServer,
+    K: SecretStore,
+  {
+    let _running = self.running.lock().await;
+    account.delete_account().await
   }
 
   async fn run_locked<S, K>(
@@ -217,7 +236,7 @@ impl FavoriteSync {
       return Ok(None);
     };
     let start = favorites_service::read_store(&self.path).map_err(SyncError::Failed)?;
-    let mut store = start.clone();
+    let mut store = start.store.clone();
     store.begin_account(&identity.account_id);
     let result = sync(&mut store, server).await;
     favorites_service::save_synced(&self.path, &start, store).map_err(SyncError::Failed)?;
@@ -792,6 +811,55 @@ mod tests {
       });
       block_on(FavoriteSync::new(path.clone()).sign_out(&account, &server, Duration::from_secs(5)))
         .unwrap();
+      assert_eq!(block_on(account.status()).identity, None);
+      assert!(!path.exists());
+    }
+
+    #[test]
+    fn the_sign_out_limit_includes_the_wait_for_a_running_sync() {
+      let dir = tempfile::tempdir().unwrap();
+      let path = dir.path().join("favorites.json");
+      let (account, _, _) = account(path.clone());
+      let server = FakeServer::new();
+      favorites_service::update_store_for_tests(&path, |store| {
+        add(store, "1", 10);
+      });
+      let sync = std::sync::Arc::new(FavoriteSync::new(path.clone()));
+
+      block_on(async {
+        // Another sync holds the lock for longer than the limit.
+        let (locked, is_locked) = tokio::sync::oneshot::channel();
+        let holder = sync.clone();
+        tokio::spawn(async move {
+          let _running = holder.running.lock().await;
+          locked.send(()).unwrap();
+          tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        is_locked.await.unwrap();
+        sync
+          .sign_out(&account, &server, Duration::from_millis(50))
+          .await
+          .unwrap();
+      });
+
+      // No push after the limit, and the clear waited for the running sync.
+      assert!(server.get("1").is_none());
+      assert_eq!(block_on(account.status()).identity, None);
+      assert!(!path.exists());
+    }
+
+    #[test]
+    fn account_deletion_clears_the_store_without_a_push() {
+      let dir = tempfile::tempdir().unwrap();
+      let path = dir.path().join("favorites.json");
+      let (account, sessions, _) = account(path.clone());
+      favorites_service::update_store_for_tests(&path, |store| {
+        add(store, "1", 10);
+      });
+
+      block_on(FavoriteSync::new(path.clone()).delete_account(&account)).unwrap();
+
+      assert!(sessions.deleted.load(Ordering::SeqCst));
       assert_eq!(block_on(account.status()).identity, None);
       assert!(!path.exists());
     }

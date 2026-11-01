@@ -7,6 +7,7 @@ use serde::Serialize;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 use tauri::{App, AppHandle, Emitter, Manager};
+use youskill_core::services::account_service::AccountError;
 use youskill_core::services::favorite_api_service::FavoriteApi;
 use youskill_core::services::favorite_sync_service::{
   FavoriteSync, RejectReason, SyncError, SyncReport,
@@ -112,4 +113,10 @@ pub async fn sign_out(app: &AppHandle) -> Result<(), String> {
     .sync
     .sign_out(&account, &state.api.server(&account), SIGN_OUT_PUSH_LIMIT)
     .await
+}
+
+/// Deletes the account and the favorites of this device, after a running sync.
+pub async fn delete_account(app: &AppHandle) -> Result<(), AccountError> {
+  let account = app.state::<Account>();
+  app.state::<Sync>().sync.delete_account(&account).await
 }
