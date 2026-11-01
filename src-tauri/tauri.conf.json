@@ -71,6 +71,11 @@
     }
   },
   "plugins": {
+    "deep-link": {
+      "desktop": {
+        "schemes": ["youskill"]
+      }
+    },
     "updater": {
       "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDNGNjFBOTYwRUVGODNERkEKUldUNlBmanVZS2xoUDNzM043cnBwNXg4c3h2L1dnbHRQWU5vUXNqakdIZjNRVlNNeGRUV0NZRFEK",
       "endpoints": ["https://github.com/wanggang316/you-skill/releases/latest/download/latest.json"]

@@ -135,6 +135,9 @@ pub enum CallbackOutcome {
 }
 
 pub trait AccountServer {
+  /// Base of the start URL, such as `https://api.youskill.cc`.
+  fn base_url(&self) -> &str;
+
   fn exchange(
     &self,
     code: &str,
@@ -169,6 +172,8 @@ pub struct AccountManager<S, K> {
   now: Clock,
   /// Held across a refresh, so only one refresh runs at a time.
   session: tokio::sync::Mutex<Option<StoredSession>>,
+  /// The same link can arrive twice at start-up; only one may use the code.
+  completing: tokio::sync::Mutex<()>,
 }
 
 impl<S: AccountServer, K: SecretStore> AccountManager<S, K> {
@@ -187,6 +192,7 @@ impl<S: AccountServer, K: SecretStore> AccountManager<S, K> {
       favorites_path,
       now,
       session: tokio::sync::Mutex::new(session),
+      completing: tokio::sync::Mutex::new(()),
     }
   }
 
@@ -198,14 +204,19 @@ impl<S: AccountServer, K: SecretStore> AccountManager<S, K> {
 
   /// Starts a sign-in and returns the URL to open in the system browser. A new sign-in
   /// replaces one that is still pending.
-  pub fn begin_sign_in(&self, provider: Provider, base_url: &str) -> Result<String, String> {
+  pub fn begin_sign_in(&self, provider: Provider) -> Result<String, String> {
     let pending = PendingSignIn {
       provider,
       state: random_token(1),
       code_verifier: random_token(2),
       created_at: (self.now)(),
     };
-    let url = start_url(base_url, provider, &pending.state, &pending.code_verifier)?;
+    let url = start_url(
+      self.server.base_url(),
+      provider,
+      &pending.state,
+      &pending.code_verifier,
+    )?;
     self.secrets.save(PENDING_KEY, &to_json(&pending)?)?;
     Ok(url)
   }
@@ -215,6 +226,7 @@ impl<S: AccountServer, K: SecretStore> AccountManager<S, K> {
     let Some(callback) = parse_callback(link) else {
       return Ok(CallbackOutcome::Ignored);
     };
+    let _completing = self.completing.lock().await;
     let pending: Option<PendingSignIn> = self
       .secrets
       .load(PENDING_KEY)?
@@ -450,10 +462,6 @@ impl HttpAccountServer {
     )
   }
 
-  pub fn base_url(&self) -> &str {
-    &self.base_url
-  }
-
   fn post(&self, path: &str) -> reqwest::RequestBuilder {
     self
       .client
@@ -494,6 +502,10 @@ async fn check(
 }
 
 impl AccountServer for HttpAccountServer {
+  fn base_url(&self) -> &str {
+    &self.base_url
+  }
+
   async fn exchange(
     &self,
     code: &str,
@@ -597,6 +609,10 @@ mod tests {
   }
 
   impl AccountServer for Arc<FakeServer> {
+    fn base_url(&self) -> &str {
+      BASE
+    }
+
     async fn exchange(
       &self,
       code: &str,
@@ -710,7 +726,7 @@ mod tests {
 
   fn signed_in(setup: &Setup) -> AccountManager<Arc<FakeServer>, Arc<MemorySecrets>> {
     let manager = setup.manager();
-    let start = manager.begin_sign_in(Provider::Github, BASE).unwrap();
+    let start = manager.begin_sign_in(Provider::Github).unwrap();
     let link = setup.browser(&start, "code-1");
     assert!(matches!(
       block_on(manager.complete_sign_in(&link)).unwrap(),
@@ -723,9 +739,9 @@ mod tests {
   fn the_start_url_has_an_s256_challenge_of_the_verifier_and_a_random_state() {
     let setup = Setup::new();
     let manager = setup.manager();
-    let first = manager.begin_sign_in(Provider::Apple, BASE).unwrap();
+    let first = manager.begin_sign_in(Provider::Apple).unwrap();
     let pending: PendingSignIn = parse(&setup.secret(PENDING_KEY).unwrap()).unwrap();
-    let second = manager.begin_sign_in(Provider::Apple, BASE).unwrap();
+    let second = manager.begin_sign_in(Provider::Apple).unwrap();
 
     let url = Url::parse(&first).unwrap();
     assert_eq!(url.path(), "/api/account/sign-in/apple");
@@ -780,10 +796,7 @@ mod tests {
   #[test]
   fn a_callback_that_starts_the_app_completes_the_pending_sign_in() {
     let setup = Setup::new();
-    let start = setup
-      .manager()
-      .begin_sign_in(Provider::Github, BASE)
-      .unwrap();
+    let start = setup.manager().begin_sign_in(Provider::Github).unwrap();
     let link = setup.browser(&start, "code-1");
     let started_by_link = setup.manager();
     assert!(matches!(
@@ -799,10 +812,37 @@ mod tests {
   }
 
   #[test]
+  fn the_same_link_twice_at_once_exchanges_once() {
+    let setup = Setup::new();
+    let manager = Arc::new(setup.manager());
+    let start = manager.begin_sign_in(Provider::Github).unwrap();
+    let link = setup.browser(&start, "code-1");
+    let outcomes = block_on(async {
+      let calls: Vec<_> = (0..2)
+        .map(|_| {
+          let manager = manager.clone();
+          let link = link.clone();
+          tokio::spawn(async move { manager.complete_sign_in(&link).await })
+        })
+        .collect();
+      let mut outcomes = Vec::new();
+      for call in calls {
+        outcomes.push(call.await.unwrap().unwrap());
+      }
+      outcomes
+    });
+    assert!(outcomes.contains(&CallbackOutcome::Ignored));
+    assert!(outcomes
+      .iter()
+      .any(|outcome| matches!(outcome, CallbackOutcome::SignedIn(_))));
+    assert_eq!(setup.server.with(|state| state.exchanges.len()), 1);
+  }
+
+  #[test]
   fn a_wrong_state_is_an_error_and_does_not_exchange() {
     let setup = Setup::new();
     let manager = setup.manager();
-    let start = manager.begin_sign_in(Provider::Github, BASE).unwrap();
+    let start = manager.begin_sign_in(Provider::Github).unwrap();
     let link = setup.browser(&start, "code-1");
     let forged = format!("{REDIRECT_URI}?code=code-1&state=other");
     assert!(block_on(manager.complete_sign_in(&forged)).is_err());
@@ -818,7 +858,7 @@ mod tests {
   fn cancel_returns_to_signed_out_without_an_error() {
     let setup = Setup::new();
     let manager = setup.manager();
-    let start = manager.begin_sign_in(Provider::Apple, BASE).unwrap();
+    let start = manager.begin_sign_in(Provider::Apple).unwrap();
     let state = Url::parse(&start)
       .unwrap()
       .query_pairs()
@@ -834,7 +874,7 @@ mod tests {
     assert_eq!(block_on(manager.status()).identity, None);
     assert!(setup.secret(PENDING_KEY).is_none());
 
-    let start = manager.begin_sign_in(Provider::Apple, BASE).unwrap();
+    let start = manager.begin_sign_in(Provider::Apple).unwrap();
     let state = Url::parse(&start)
       .unwrap()
       .query_pairs()
@@ -851,13 +891,13 @@ mod tests {
   fn a_rejected_or_late_code_is_an_error() {
     let setup = Setup::new();
     let manager = setup.manager();
-    let start = manager.begin_sign_in(Provider::Github, BASE).unwrap();
+    let start = manager.begin_sign_in(Provider::Github).unwrap();
     let link = setup.browser(&start, "code-1");
     setup.server.with(|state| state.codes.clear());
     assert!(block_on(manager.complete_sign_in(&link)).is_err());
     assert_eq!(block_on(manager.status()).identity, None);
 
-    let start = manager.begin_sign_in(Provider::Github, BASE).unwrap();
+    let start = manager.begin_sign_in(Provider::Github).unwrap();
     let link = setup.browser(&start, "code-2");
     setup.advance(PENDING_TTL_SECS + 1);
     assert!(block_on(manager.complete_sign_in(&link)).is_err());
@@ -868,7 +908,7 @@ mod tests {
   fn other_links_are_ignored() {
     let setup = Setup::new();
     let manager = setup.manager();
-    manager.begin_sign_in(Provider::Github, BASE).unwrap();
+    manager.begin_sign_in(Provider::Github).unwrap();
     for link in [
       "youskill://other?code=1",
       "https://auth/callback?code=1",

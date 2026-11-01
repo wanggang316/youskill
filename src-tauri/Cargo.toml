@@ -3,8 +3,8 @@ members = ["crates/*"]
 
 [workspace.package]
 version = "0.10.0"
-# std::fs::File::lock is stable since 1.89.
-rust-version = "1.89"
+# std::fs::File::lock is stable since 1.89; the deep link and single instance plugins need 1.90.
+rust-version = "1.90"
 
 [package]
 name = "you-skill"
@@ -26,6 +26,9 @@ tauri-plugin-shell = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+tauri-plugin-deep-link = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 image = "0.25"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
