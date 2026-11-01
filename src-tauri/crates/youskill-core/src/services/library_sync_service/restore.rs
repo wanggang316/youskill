@@ -1,12 +1,13 @@
 //! Restore the library from the repository, item by item.
 //!
-//! Each item (a hub skill, an instruction template, the custom agents file) is compared in
-//! three states: the base (the last synced commit, kept in the sync state), this computer
+//! Each item this device gets (a hub skill, an instruction template, a custom agent) is
+//! compared in three states: the base (the last synced commit, kept in the sync state), this computer
 //! (the snapshot a backup would build) and the target commit. What changed on one side only
 //! is taken from that side, what changed on both is a conflict the user decides, and a
 //! remote removal waits for confirmation. `plan_restore` computes the comparison;
 //! `apply_restore` applies it with the user's decisions and commits the merged result on top
-//! of the branch, so other computers fast-forward as usual.
+//! of the branch, so other computers fast-forward as usual. The device-only items and device
+//! files of other devices are never written here and are kept from the head.
 
 use super::checkpoint::{self, Link};
 use super::*;
@@ -78,7 +79,7 @@ pub enum MatchReason {
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct RestoreItem {
-  /// `skill:<id>`, `instruction:<id>` or `agents`, with the repository's id.
+  /// `skill:<id>`, `instruction:<id>` or `agent:<id>`, with the repository's id.
   pub key: String,
   pub kind: ItemKind,
   pub id: String,
@@ -111,6 +112,8 @@ pub enum PlanState {
   /// First connect with a library on both sides: choose `merge`, `replace_local` or
   /// `replace_remote`.
   ChooseMode,
+  /// The repository holds a version 1 library; migrate it first (`migrate`).
+  MigrationRequired,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -159,7 +162,7 @@ pub struct RestoreDecisions {
   #[serde(default)]
   pub removals: BTreeMap<String, RemovalChoice>,
   /// Include (`true`) or exclude a `take_remote` item. Default: include, except a deferred
-  /// item.
+  /// item (an incoming item, which a backup kept from another device, is included).
   #[serde(default)]
   pub include: BTreeMap<String, bool>,
 }
@@ -249,8 +252,10 @@ pub fn plan_restore_with(
 ) -> Result<RestorePlan, String> {
   normalize_library(env)?;
   let _ops = ops_guard(env)?;
-  let state = read_state(env)?;
+  let mut state = read_state(env)?;
   state.connected()?;
+  ensure_device(env, &mut state)?;
+  fill_base_agents(env, remote, &mut state)?;
   Ok(compute_plan(env, remote, &state, mode, target)?.plan)
 }
 
@@ -258,8 +263,9 @@ pub fn plan_restore_with(
 struct Planned {
   plan: RestorePlan,
   head: Option<RemoteHead>,
-  target_library: LibraryFile,
-  target_files: BTreeMap<String, TreeFile>,
+  /// The head commit, for the parts of other devices.
+  head_state: RepoState,
+  target_state: RepoState,
   /// Local items, keyed by the repository key after first-merge pairing.
   local: BTreeMap<String, ItemVersion>,
   remote: BTreeMap<String, ItemVersion>,
@@ -267,7 +273,7 @@ struct Planned {
   pairs: BTreeMap<String, (String, MatchReason)>,
 }
 
-fn change(base: Option<&ItemVersion>, side: Option<&ItemVersion>) -> ItemChange {
+pub(super) fn change(base: Option<&ItemVersion>, side: Option<&ItemVersion>) -> ItemChange {
   match (base, side) {
     (None, None) => ItemChange::Unchanged,
     (None, Some(_)) => ItemChange::Added,
@@ -277,7 +283,7 @@ fn change(base: Option<&ItemVersion>, side: Option<&ItemVersion>) -> ItemChange 
   }
 }
 
-fn resolve(
+pub(super) fn resolve(
   local_change: ItemChange,
   remote_change: ItemChange,
   local: Option<&ItemVersion>,
@@ -305,19 +311,20 @@ fn resolve(
 }
 
 /// Pair local and repository items of the same kind that have different ids: equal content
-/// first, then equal source key. Paired local items move to the repository key.
+/// first, then equal source key. Paired local items move to the repository key. Custom
+/// agents pair only by id.
 fn pair_items(
   local: &mut BTreeMap<String, ItemVersion>,
   remote: &BTreeMap<String, ItemVersion>,
 ) -> BTreeMap<String, (String, MatchReason)> {
   let local_only: Vec<String> = local
     .keys()
-    .filter(|key| key.as_str() != AGENTS_KEY && !remote.contains_key(*key))
+    .filter(|key| local[*key].kind() != ItemKind::Agent && !remote.contains_key(*key))
     .cloned()
     .collect();
   let mut remote_free: BTreeSet<String> = remote
     .keys()
-    .filter(|key| key.as_str() != AGENTS_KEY && !local.contains_key(*key))
+    .filter(|key| remote[*key].kind() != ItemKind::Agent && !local.contains_key(*key))
     .cloned()
     .collect();
   let mut pairs: BTreeMap<String, (String, MatchReason)> = BTreeMap::new();
@@ -359,8 +366,11 @@ fn fingerprint(state: &SyncState, snapshot: &Snapshot) -> Result<String, String>
   let value = serde_json::json!({
     "base": state.last_synced_commit,
     "deferred": state.deferred.keys().collect::<Vec<_>>(),
+    "incoming": state.incoming.keys().collect::<Vec<_>>(),
     "library": snapshot.library,
-    "tree": snapshot.tree(),
+    "agents": snapshot.agents,
+    "device": snapshot.device,
+    "tree": snapshot.item_tree(),
   });
   Ok(blob_sha(
     serde_json::to_vec(&value)
@@ -376,13 +386,17 @@ fn compute_plan(
   mode: RestoreMode,
   target: Option<&str>,
 ) -> Result<Planned, String> {
-  // The real local library: deferred items are compared with their local version.
+  let device = state.device();
+  // The real local library: deferred and incoming items are compared with their local
+  // version.
   let snapshot = local_snapshot(
     env,
     &SyncState {
       deferred: BTreeMap::new(),
+      incoming: BTreeMap::new(),
       ..state.clone()
     },
+    &device,
   )?;
   let head = remote.head()?;
   let mut planned = Planned {
@@ -396,46 +410,55 @@ fn compute_plan(
       items: Vec::new(),
     },
     head: head.clone(),
-    target_library: LibraryFile::default(),
-    target_files: BTreeMap::new(),
+    head_state: RepoState::default(),
+    target_state: RepoState::default(),
     local: BTreeMap::new(),
     remote: BTreeMap::new(),
     pairs: BTreeMap::new(),
   };
 
-  let target_ref = match (target, &head) {
-    (_, None) => return Ok(planned),
-    (None, Some(head)) => (head.commit.clone(), head.tree.clone()),
-    (Some(id), Some(head)) if id == head.commit => (head.commit.clone(), head.tree.clone()),
-    (Some(id), Some(_)) => {
-      let commit = remote
-        .history(HISTORY_LIMIT)?
-        .into_iter()
-        .find(|commit| commit.id == id)
-        .ok_or_else(|| format!("Commit {} is not in the recent history of the branch", id))?;
-      (commit.id, commit.tree)
-    },
+  let Some(head) = head else {
+    return Ok(planned);
   };
-  let target_files = remote.tree(&target_ref.1)?;
-  let Some(library_file) = target_files.get(LIBRARY_FILE) else {
+  let head_files = remote.tree(&head.tree)?;
+  let Some(head_state) = load_repo_state(remote, &head.commit, &head_files, &device)? else {
     if target.is_some() {
       return Err("That commit holds no library".to_string());
     }
     return Ok(planned);
   };
-  let wanted = BTreeMap::from([(LIBRARY_FILE.to_string(), library_file.clone())]);
-  let target_library = parse_library(&remote.download(&target_ref.0, &wanted)?[LIBRARY_FILE])?;
-  planned.plan.target_commit = Some(target_ref.0.clone());
+  if head_state.library.version < LIBRARY_VERSION {
+    planned.plan.state = PlanState::MigrationRequired;
+    return Ok(planned);
+  }
+  let (target_commit, target_state) = match target {
+    None => (head.commit.clone(), head_state.clone()),
+    Some(id) if id == head.commit => (head.commit.clone(), head_state.clone()),
+    Some(id) => {
+      let commit = remote
+        .history(HISTORY_LIMIT)?
+        .into_iter()
+        .find(|commit| commit.id == id)
+        .ok_or_else(|| format!("Commit {} is not in the recent history of the branch", id))?;
+      let files = remote.tree(&commit.tree)?;
+      let target_state = load_repo_state(remote, &commit.id, &files, &device)?
+        .ok_or_else(|| "That commit holds no library".to_string())?;
+      (commit.id, target_state)
+    },
+  };
+  planned.plan.target_commit = Some(target_commit.clone());
 
   let first = state.last_synced_commit.is_none();
   let local_empty = snapshot.library.skills.is_empty() && snapshot.library.instructions.is_empty();
   if first && mode == RestoreMode::Pull && !local_empty {
     planned.plan.state = PlanState::ChooseMode;
+    planned.head_state = head_state;
+    planned.target_state = target_state;
     return Ok(planned);
   }
 
-  let mut local = item_versions(&snapshot.library, &snapshot.tree());
-  let remote_items = item_versions(&target_library, &target_files);
+  let mut local = snapshot.items();
+  let remote_items = target_state.items(&device);
   let pairs = if first && matches!(mode, RestoreMode::Merge | RestoreMode::ReplaceLocal) {
     pair_items(&mut local, &remote_items)
   } else {
@@ -444,12 +467,10 @@ fn compute_plan(
   let base = match mode {
     RestoreMode::ReplaceLocal => local.clone(),
     RestoreMode::ReplaceRemote => remote_items.clone(),
-    RestoreMode::Pull | RestoreMode::Merge => match &state.base_library {
-      Some(library) if !first => item_versions(library, &state.base_files),
-      _ => item_versions(&LibraryFile::default(), &BTreeMap::new()),
-    },
+    RestoreMode::Pull | RestoreMode::Merge if !first => state.base().items(&device),
+    RestoreMode::Pull | RestoreMode::Merge => BTreeMap::new(),
   };
-  let honor_deferred = matches!(mode, RestoreMode::Pull | RestoreMode::Merge);
+  let honor_carried = matches!(mode, RestoreMode::Pull | RestoreMode::Merge);
 
   let keys: BTreeSet<&String> = base
     .keys()
@@ -459,13 +480,15 @@ fn compute_plan(
   let mut items = Vec::new();
   for key in keys {
     let (l, r) = (local.get(key), remote_items.get(key));
-    let deferred_version = state.deferred.get(key).filter(|_| honor_deferred);
+    let deferred_version = state.deferred.get(key).filter(|_| honor_carried);
+    let incoming = state.incoming.get(key).filter(|_| honor_carried);
     // A deferred item is compared with its local version: the repository version is
-    // offered again until the user takes it.
-    let b = if deferred_version.is_some() {
-      l
-    } else {
-      base.get(key)
+    // offered again until the user takes it. An incoming item is compared with the base
+    // it had before the other device changed it.
+    let b = match (incoming, deferred_version) {
+      (Some(incoming), _) => incoming.base.as_ref(),
+      (None, Some(_)) => l,
+      (None, None) => base.get(key),
     };
     let (local_change, remote_change) = (change(b, l), change(b, r));
     let paired = pairs.get(key);
@@ -496,8 +519,9 @@ fn compute_plan(
       remote_change,
       resolution,
       match_reason: paired.map(|(_, reason)| *reason),
-      deferred: deferred_version
-        .is_some_and(|version| r.is_some_and(|remote| remote.same_content(version))),
+      deferred: incoming.is_none()
+        && deferred_version
+          .is_some_and(|version| r.is_some_and(|remote| remote.same_content(version))),
     });
   }
   items.sort_by(|a, b| {
@@ -505,14 +529,14 @@ fn compute_plan(
   });
 
   planned.plan.state =
-    if items.is_empty() && state.last_synced_commit.as_deref() == Some(target_ref.0.as_str()) {
+    if items.is_empty() && state.last_synced_commit.as_deref() == Some(target_commit.as_str()) {
       PlanState::UpToDate
     } else {
       PlanState::Ready
     };
   planned.plan.items = items;
-  planned.target_library = target_library;
-  planned.target_files = target_files;
+  planned.head_state = head_state;
+  planned.target_state = target_state;
   planned.local = local;
   planned.remote = remote_items;
   planned.pairs = pairs;
@@ -592,7 +616,7 @@ impl Actions {
             },
             ConflictChoice::KeepBoth => {
               let both = planned.local.contains_key(key) && planned.remote.contains_key(key);
-              if !both || item.kind == ItemKind::Agents {
+              if !both || item.kind == ItemKind::Agent {
                 return Err(format!(
                   "{} cannot be kept twice: choose this computer's or the repository's version",
                   if item.name.is_empty() {
@@ -648,8 +672,10 @@ pub fn apply_restore_with(
 ) -> Result<RestoreOutcome, String> {
   normalize_library(env)?;
   let ops = ops_guard(env)?;
-  let state = read_state(env)?;
+  let mut state = read_state(env)?;
   state.connected()?;
+  ensure_device(env, &mut state)?;
+  fill_base_agents(env, remote, &mut state)?;
   let planned = compute_plan(env, remote, &state, plan.mode, plan.target.as_deref())?;
   if planned.plan.remote_head != plan.remote_head
     || planned.plan.target_commit != plan.target_commit
@@ -662,8 +688,14 @@ pub fn apply_restore_with(
   else {
     return Err("The repository holds no library yet. Back up instead".to_string());
   };
-  if planned.plan.state == PlanState::ChooseMode {
-    return Err("Choose how to combine this library with the repository".to_string());
+  match planned.plan.state {
+    PlanState::ChooseMode => {
+      return Err("Choose how to combine this library with the repository".to_string())
+    },
+    PlanState::MigrationRequired => {
+      return Err("Update the repository to the new library format first".to_string())
+    },
+    _ => {},
   }
   let actions = Actions::from_decisions(&planned, decisions)?;
   let prepared = prepare_remote_items(env, remote, &planned, &target_commit, &actions.writes)?;
@@ -683,7 +715,8 @@ pub fn apply_restore_with(
     };
     copy_local(env, key, new_id, detach)?;
   }
-  let agents_changed = write_prepared(env, &planned, &prepared)?;
+  write_prepared(env, &planned, &prepared)?;
+  let agents_changed = write_agents(env, &planned, &actions)?;
   // Installs stay where they are; symlinks into a removed item become real copies.
   let mut errors = Vec::new();
   let lock = store(env).read()?;
@@ -709,12 +742,19 @@ pub fn apply_restore_with(
     ));
   }
 
+  // The base becomes the target. Its device file for this device (when it has one) is
+  // the base of the installs here, so the pending list shows what it changes.
   let mut next = state.clone();
   next.last_synced_commit = Some(target_commit.clone());
   next.last_pull_at = Some(now_rfc3339());
-  next.base_files = planned.target_files.clone();
-  next.base_library = Some(planned.target_library.clone());
+  next.base_files = planned.target_state.files.clone();
+  next.base_library = Some(planned.target_state.library.clone());
+  next.base_agents = Some(planned.target_state.agents.clone());
+  if planned.target_state.device.is_some() {
+    next.base_device = planned.target_state.device.clone();
+  }
   next.deferred = actions.deferred.clone();
+  next.incoming.clear();
   write_state(env, &next)?;
 
   let mut outcome = commit_result(env, remote, &planned, &head, &target_commit)?;
@@ -756,14 +796,15 @@ fn install_targets(env: &Env, items: &[PendingItem]) -> Vec<PathBuf> {
         ItemKind::Instruction => instruction_service::resolve_target(env, &spec)
           .ok()
           .map(|target| target.path),
-        ItemKind::Agents => None,
+        ItemKind::Agent | ItemKind::Device => None,
       }
     })
     .collect()
 }
 
 /// Commit this computer's library on top of the branch head when it differs from it, and
-/// make the result the new base. Called under the operation lock.
+/// make the result the new base. The parts of other devices come from the head. Called
+/// under the operation lock.
 fn commit_result(
   env: &Env,
   remote: &dyn RemoteRepo,
@@ -772,13 +813,11 @@ fn commit_result(
   target_commit: &str,
 ) -> Result<RestoreOutcome, String> {
   let mut state = read_state(env)?;
-  let snapshot = local_snapshot(env, &state)?;
-  let tree = snapshot.tree();
-  let head_files = if head.commit == target_commit {
-    planned.target_files.clone()
-  } else {
-    remote.tree(&head.tree)?
-  };
+  let device = state.device();
+  let snapshot = local_snapshot(env, &state, &device)?;
+  let foreign = planned.head_state.foreign(&device);
+  let head_files = &planned.head_state.files;
+  let mut composed = compose(&snapshot, &foreign, &device, None)?;
   let mut outcome = RestoreOutcome {
     result: RestoreResult::Applied,
     commit: None,
@@ -788,33 +827,29 @@ fn commit_result(
     installs: None,
   };
 
-  if tree != head_files {
+  if &composed.tree != head_files {
+    let now = now_rfc3339();
+    composed = compose(&snapshot, &foreign, &device, Some(now.clone()))?;
     upload_blobs(
       remote,
-      &snapshot,
-      &tree,
-      &[&head_files, &planned.target_files],
+      &composed.contents,
+      &composed.tree,
+      &[head_files, &planned.target_state.files],
     )?;
-    let device = state
-      .device_name
-      .clone()
-      .unwrap_or_else(default_device_name);
-    let changes = diff_library(
-      Some(&planned.target_library),
-      &planned.target_files,
-      &snapshot.library,
-      &tree,
-    );
+    let changes = local_changes(&planned.target_state, &snapshot, &device);
     let message = if head.commit == target_commit {
-      format!("Merge on {}", commit_message(&device, &changes))
+      format!(
+        "Merge on {}",
+        commit_message(&state.device_label(), &changes)
+      )
     } else {
       format!(
         "Restore {} on {}",
         &target_commit[..target_commit.len().min(7)],
-        commit_message(&device, &changes)
+        commit_message(&state.device_label(), &changes)
       )
     };
-    let tree_sha = remote.create_tree(&tree)?;
+    let tree_sha = remote.create_tree(&composed.tree)?;
     let commit = remote.create_commit(&message, &tree_sha, Some(&head.commit))?;
     match remote.update_head(&commit) {
       Ok(()) => {},
@@ -823,16 +858,14 @@ fn commit_result(
       Err(UpdateError::Rejected) => return Ok(RestoreOutcome::stale(true)),
       Err(UpdateError::Other(err)) => return Err(err),
     }
-    state.last_synced_commit = Some(commit.clone());
-    state.last_backup_at = Some(now_rfc3339());
+    state.last_backup_at = Some(now);
     outcome.pushed = true;
+    outcome.commit = Some(commit.clone());
+    set_base(&mut state, commit, composed, &snapshot);
   } else {
-    state.last_synced_commit = Some(head.commit.clone());
+    outcome.commit = Some(head.commit.clone());
+    set_base(&mut state, head.commit.clone(), composed, &snapshot);
   }
-  outcome.commit = state.last_synced_commit.clone();
-  state.base_files = tree;
-  state.base_library = Some(snapshot.library.clone());
-  state.base_local_agents = snapshot.local_agents.clone();
   write_state(env, &state)?;
   Ok(outcome)
 }
@@ -969,7 +1002,7 @@ fn rekey(env: &Env, local_key: &str, remote_key: &str) -> Result<(), String> {
         Ok(())
       })
     },
-    ItemKind::Agents => Ok(()),
+    ItemKind::Agent | ItemKind::Device => Ok(()),
   }
 }
 
@@ -1094,8 +1127,6 @@ struct Prepared {
   skills: Vec<String>,
   /// Instruction id -> content.
   instructions: BTreeMap<String, Vec<u8>>,
-  /// The normalized custom agents file, when it is written.
-  agents: Option<Vec<u8>>,
 }
 
 /// A repository path split into safe components, or `None` for anything that could leave
@@ -1147,16 +1178,15 @@ fn prepare_remote_items(
   commit: &str,
   keys: &BTreeSet<String>,
 ) -> Result<Prepared, String> {
-  let library = &planned.target_library;
+  let library = &planned.target_state.library;
   let mut wanted: BTreeMap<String, TreeFile> = BTreeMap::new();
   for key in keys {
     if let (Some(version), Some((_, id))) = (planned.remote.get(key), split_key(key)) {
-      // A missing agents file is an empty list, not a file to download.
       wanted.extend(
         version
           .paths(id)
           .into_iter()
-          .filter(|(path, _)| planned.target_files.contains_key(path)),
+          .filter(|(path, _)| planned.target_state.files.contains_key(path)),
       );
     }
   }
@@ -1169,7 +1199,6 @@ fn prepare_remote_items(
   let mut prepared = Prepared {
     skills: Vec::new(),
     instructions: BTreeMap::new(),
-    agents: None,
   };
 
   let staging = env.youskill_root.join(STAGING_DIR);
@@ -1232,23 +1261,8 @@ fn prepare_remote_items(
           )),
         }
       },
-      Some((ItemKind::Agents, _)) => {
-        let mut apps: Vec<AgentApp> = match contents.get(AGENTS_FILE) {
-          Some(content) => match serde_json::from_slice(content) {
-            Ok(apps) => apps,
-            Err(err) => {
-              errors.push(format!(
-                "The repository's agents.json is not valid: {}",
-                err
-              ));
-              continue;
-            },
-          },
-          None => Vec::new(),
-        };
-        apps.sort_by(|a, b| a.id.cmp(&b.id));
-        prepared.agents = Some(agents_json(&apps)?);
-      },
+      // A custom agent has no files: its entry is its content.
+      Some((ItemKind::Agent | ItemKind::Device, _)) => {},
       None => {},
     }
   }
@@ -1261,8 +1275,8 @@ fn prepare_remote_items(
 
 /// Move the prepared items into the hub and the lock files. Called under the operation
 /// lock. Returns whether the custom agent definitions changed.
-fn write_prepared(env: &Env, planned: &Planned, prepared: &Prepared) -> Result<bool, String> {
-  let library = &planned.target_library;
+fn write_prepared(env: &Env, planned: &Planned, prepared: &Prepared) -> Result<(), String> {
+  let library = &planned.target_state.library;
   let staging = env.youskill_root.join(STAGING_DIR);
   let lock = store(env).read()?;
   for id in &prepared.skills {
@@ -1363,13 +1377,30 @@ fn write_prepared(env: &Env, planned: &Planned, prepared: &Prepared) -> Result<b
     Ok(())
   })?;
 
-  let mut agents_changed = false;
-  if let Some(normalized) = &prepared.agents {
-    if &agents_json(&read_user_agent_apps(env)?)? != normalized {
-      write_atomic(&user_agent_apps_path(env), normalized)?;
-      agents_changed = true;
+  let _ = remove_path_any(&staging);
+  Ok(())
+}
+
+/// Write the custom agents the restore takes or removes into `user_agent_apps.json`, one by
+/// one. Returns whether the definitions changed.
+fn write_agents(env: &Env, planned: &Planned, actions: &Actions) -> Result<bool, String> {
+  let before = read_user_agent_apps(env)?;
+  let mut apps = before.clone();
+  for key in &actions.writes {
+    if let Some(Entry::Agent(agent)) = planned.remote.get(key).map(|version| &version.entry) {
+      apps.retain(|app| app.id != agent.app.id);
+      apps.push(agent.app.clone());
     }
   }
-  let _ = remove_path_any(&staging);
-  Ok(agents_changed)
+  for key in &actions.removals {
+    if let Some((ItemKind::Agent, id)) = split_key(key) {
+      apps.retain(|app| app.id != id);
+    }
+  }
+  apps.sort_by(|a, b| a.id.cmp(&b.id));
+  if apps == before {
+    return Ok(false);
+  }
+  write_atomic(&user_agent_apps_path(env), &pretty_json(&apps)?)?;
+  Ok(true)
 }

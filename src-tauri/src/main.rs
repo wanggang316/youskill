@@ -37,8 +37,9 @@ use commands::{
   },
   library_sync::{
     library_sync_apply_pending, library_sync_apply_restore, library_sync_backup,
-    library_sync_connect, library_sync_disconnect, library_sync_history, library_sync_pending,
-    library_sync_plan_restore, library_sync_status, library_sync_undo_restore,
+    library_sync_connect, library_sync_disconnect, library_sync_history, library_sync_migrate,
+    library_sync_pending, library_sync_plan_restore, library_sync_status,
+    library_sync_undo_restore,
   },
   remote::{
     fetch_hot_repositories, fetch_market_categories, fetch_remote_skill, fetch_remote_skills,
@@ -215,6 +216,7 @@ fn main() {
       library_sync_connect,
       library_sync_disconnect,
       library_sync_backup,
+      library_sync_migrate,
       library_sync_plan_restore,
       library_sync_apply_restore,
       library_sync_undo_restore,

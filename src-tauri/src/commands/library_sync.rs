@@ -39,6 +39,13 @@ pub async fn library_sync_backup() -> Result<BackupOutcome, String> {
   blocking(|| library_sync_service::backup(&Env::current()?)).await
 }
 
+/// Migrate a version 1 repository to item scopes and device files, after the user
+/// confirmed it. Other computers must update the app before they sync again.
+#[tauri::command]
+pub async fn library_sync_migrate() -> Result<(), String> {
+  blocking(|| library_sync_service::migrate(&Env::current()?)).await
+}
+
 /// Compare this computer's library with the branch head, or with `target`, an earlier
 /// commit of the branch.
 #[tauri::command]
