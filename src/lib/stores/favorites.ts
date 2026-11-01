@@ -17,6 +17,8 @@ interface FavoritesState {
   unavailable: string[];
   /** The last sync reverted adds because the account has the maximum number of favorites. */
   limitReached: boolean;
+  /** The last sync reverted changes that the account rejected for another reason. */
+  otherRejected: boolean;
 }
 
 /** A marketplace lookup failed because the skill left the marketplace. */
@@ -54,6 +56,7 @@ export function createFavorites(
     error: "",
     unavailable: [],
     limitReached: false,
+    otherRejected: false,
   });
   const patch = (value: Partial<FavoritesState>) =>
     state.update((current) => ({ ...current, ...value }));
@@ -73,15 +76,16 @@ export function createFavorites(
   }
 
   /** A sync with the account changed the records of this device. */
-  function synced({ limitReached }: FavoritesSynced) {
+  function synced({ limitReached, rejected }: FavoritesSynced) {
     if (limitReached.length) patch({ limitReached: true });
+    if (rejected.length) patch({ otherRejected: true });
     void reload();
   }
 
   async function change(skillId: string, favorited: boolean, skill?: RemoteSkill) {
     if (busy.has(skillId)) return;
     busy.add(skillId);
-    patch({ error: "", limitReached: false });
+    patch({ error: "", limitReached: false, otherRejected: false });
     try {
       const items = await api.set(
         skillId,

@@ -408,6 +408,11 @@
               {$t("market.favorites.limitReached")}
             </p>
           {/if}
+          {#if $favoritesState.otherRejected}
+            <p class="text-error px-6 pt-4 text-sm" role="alert">
+              {$t("market.favorites.rejected")}
+            </p>
+          {/if}
           {#if showingFavorites}
             {#if !shownFavorites.length}
               <p class="text-base-content-muted p-12 text-center text-sm">

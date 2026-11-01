@@ -200,3 +200,25 @@ test("a sync reloads the list and shows a reverted add over the account limit", 
   await favorites.remove("2");
   assert.equal(state.limitReached, false);
 });
+
+test("a sync shows a message for changes the account rejected for another reason", async () => {
+  let handler;
+  const favorites = createFavorites({
+    list: async () => [],
+    set: async () => [],
+    listen: async (next) => {
+      handler = next;
+    },
+  });
+  let state;
+  favorites.state.subscribe((value) => (state = value));
+  await favorites.load();
+
+  handler({ limitReached: [], rejected: ["7"] });
+  await new Promise((resolve) => setTimeout(resolve));
+  assert.equal(state.otherRejected, true);
+  assert.equal(state.limitReached, false);
+
+  await favorites.remove("1");
+  assert.equal(state.otherRejected, false);
+});
