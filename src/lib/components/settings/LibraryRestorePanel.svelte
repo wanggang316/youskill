@@ -56,6 +56,8 @@
   );
   const incomingItems = $derived(plan.items.filter((item) => item.resolution === "take_remote"));
   const outgoingItems = $derived(plan.items.filter((item) => item.resolution === "keep_local"));
+  /** An item another device made device-only is removed unless the user keeps it. */
+  const removing = (item: RestoreItem) => removals[item.key] ?? item.madeDeviceOnly;
   const undecided = $derived(conflictItems.filter((item) => !conflicts[item.key]).length);
   const includedCount = $derived(incomingItems.filter((item) => included(item)).length);
 
@@ -136,7 +138,7 @@
       (included(item) ? summary.incoming : summary.left).push(itemName(item));
     }
     for (const item of removalItems) {
-      (removals[item.key] ? summary.removed : summary.left).push(itemName(item));
+      (removing(item) ? summary.removed : summary.left).push(itemName(item));
     }
     for (const item of conflictItems) {
       const choice = conflicts[item.key];
@@ -153,7 +155,7 @@
       {
         conflicts,
         removals: Object.fromEntries(
-          removalItems.map((item) => [item.key, removals[item.key] ? "remove" : "keep"])
+          removalItems.map((item) => [item.key, removing(item) ? "remove" : "keep"])
         ),
         include: Object.fromEntries(incomingItems.map((item) => [item.key, included(item)])),
       },
@@ -327,11 +329,18 @@
                 <label class="text-base-content flex items-center gap-2.5 text-[13px]">
                   <input
                     type="checkbox"
-                    checked={removals[item.key] ?? false}
-                    onchange={() => (removals = { ...removals, [item.key]: !removals[item.key] })}
+                    checked={removing(item)}
+                    onchange={() => (removals = { ...removals, [item.key]: !removing(item) })}
                     disabled={busy}
                   />
-                  <span class="min-w-0 truncate">{itemName(item)}</span>
+                  <span class="min-w-0 truncate">
+                    {itemName(item)}
+                    {#if item.madeDeviceOnly}
+                      <span class="text-base-content-muted text-xs">
+                        · {$t("settings.sync.restore.madeDeviceOnly")}
+                      </span>
+                    {/if}
+                  </span>
                 </label>
               </li>
             {/each}

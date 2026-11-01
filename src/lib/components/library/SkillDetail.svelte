@@ -6,6 +6,7 @@
   import SegmentedTabs from "$lib/components/ui/SegmentedTabs.svelte";
   import SkillFileViewer from "$lib/components/SkillFileViewer.svelte";
   import InstallTargets from "./InstallTargets.svelte";
+  import ItemScopeField from "./ItemScopeField.svelte";
   import DriftPanel, { type TargetAction } from "./DriftPanel.svelte";
   import { t } from "$lib/i18n";
   import type { AgentInfo } from "$lib/api/skills";
@@ -174,6 +175,7 @@
           <dd>{formatDate(skill.importedAt)}</dd>
           <dt>{$t("detail.updatedAt")}</dt>
           <dd>{formatDate(skill.updatedAt)}</dd>
+          <ItemScopeField itemKey={`skill:${skill.id}`} />
         </dl>
 
         {#if actionError}

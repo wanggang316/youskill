@@ -7,14 +7,18 @@
     applyLibraryRestore,
     backupLibrary,
     connectLibrarySync,
+    copySyncDeviceInstalls,
     disconnectLibrarySync,
     getGithubAuthStatus,
     getLibrarySyncStatus,
     listLibraryHistory,
     listLibraryPending,
+    listSyncDevices,
     migrateLibrarySync,
     planLibraryRestore,
+    takeOverSyncDevice,
     undoLibraryRestore,
+    type DeviceInfo,
     type FirstConnectMode,
     type GithubAuthStatus,
     type LibraryChange,
@@ -31,10 +35,12 @@
   import IconButton from "$lib/components/ui/IconButton.svelte";
   import Modal from "$lib/components/ui/Modal.svelte";
   import PrimaryActionButton from "$lib/components/ui/PrimaryActionButton.svelte";
+  import SelectField from "$lib/components/ui/SelectField.svelte";
   import { t } from "$lib/i18n";
   import { buildSettingsHref } from "$lib/navigation/app-shell";
   import { agentsById, loadAgents, refreshHub } from "$lib/stores/hub";
   import { refreshInstructions } from "$lib/stores/instructions";
+  import LibraryDevicesDialog from "./LibraryDevicesDialog.svelte";
   import LibraryInstallFailures from "./LibraryInstallFailures.svelte";
   import LibraryRestorePanel from "./LibraryRestorePanel.svelte";
   import LibraryRestoreResult, {
@@ -55,7 +61,18 @@
     | "undo"
     | "migrate"
     | "disconnect";
-  type Dialog = "restore" | "changes" | "pending" | "history" | "undo" | "migrate" | "disconnect";
+  type Dialog =
+    | "restore"
+    | "changes"
+    | "pending"
+    | "history"
+    | "undo"
+    | "migrate"
+    | "disconnect"
+    | "devices"
+    | "start";
+  /** How a computer that never synced starts: as a new device, with copied installs, or as an old device. */
+  type StartChoice = "new" | "copy" | "take_over";
   type Notice = { tone: "success" | "info" | "error"; text: string };
 
   const DEFAULT_REPO = "youskill-library";
@@ -86,6 +103,10 @@
   let pendingFailures = $state<PendingFailure[]>([]);
   /** The backup or restore preview to run again after the repository migration. */
   let afterMigrate: (() => Promise<void>) | null = null;
+  /** Other devices of the repository, offered on the first connect. */
+  let otherDevices = $state<DeviceInfo[]>([]);
+  let startChoice = $state<StartChoice>("new");
+  let startDevice = $state("");
 
   const githubReady = $derived(Boolean(github?.gh_installed && github?.selected_login));
   const pendingGroups = $derived(
@@ -168,16 +189,54 @@
   const connect = () =>
     run("connect", async () => {
       status = await connectLibrarySync(repoInput);
-      await preview("pull");
-      if (dialog === "migrate") return;
-      if (plan?.state === "choose_mode") {
-        notice = { tone: "info", text: $t("settings.sync.connectedChooseHint") };
-      } else if (plan?.state !== "remote_empty" && status.libraryEmpty) {
-        notice = { tone: "info", text: $t("settings.sync.connectedRestoreHint") };
-      } else if (dialog === null) {
-        notice = { tone: "success", text: $t("settings.sync.connected") };
-      }
+      if (!status.hasSynced && (await offerStart())) return;
+      await afterConnect();
     });
+
+  /** On a first connect to a repository with other devices, ask how this computer starts. */
+  async function offerStart(): Promise<boolean> {
+    let devices: DeviceInfo[];
+    try {
+      devices = await listSyncDevices();
+    } catch {
+      // A repository in an older format is migrated by the restore preview first.
+      return false;
+    }
+    otherDevices = devices
+      .filter((device) => !device.thisDevice && device.hasFile)
+      .sort((a, b) => (b.lastBackupAt ?? "").localeCompare(a.lastBackupAt ?? ""));
+    if (otherDevices.length === 0) return false;
+    startChoice = "new";
+    startDevice = otherDevices[0].id;
+    openDialog("start");
+    return true;
+  }
+
+  const start = () =>
+    run("connect", async () => {
+      if (startChoice === "copy") status = await copySyncDeviceInstalls(startDevice);
+      if (startChoice === "take_over") status = await takeOverSyncDevice(startDevice);
+      dialog = null;
+      await afterConnect();
+    });
+
+  async function afterConnect() {
+    await preview("pull");
+    if (dialog === "migrate") return;
+    if (plan?.state === "choose_mode") {
+      notice = { tone: "info", text: $t("settings.sync.connectedChooseHint") };
+    } else if (plan?.state !== "remote_empty" && status?.libraryEmpty) {
+      notice = { tone: "info", text: $t("settings.sync.connectedRestoreHint") };
+    } else if (dialog === null) {
+      notice = { tone: "success", text: $t("settings.sync.connected") };
+    }
+  }
+
+  async function devicesChanged(change: { status?: SyncStatus; agents?: boolean }) {
+    if (change.status) status = change.status;
+    else status = await getLibrarySyncStatus();
+    await reloadLibrary(change.agents ?? false);
+  }
 
   const disconnect = () =>
     run("disconnect", async () => {
@@ -576,6 +635,19 @@
         </SettingsRow>
       {/if}
       <SettingsRow
+        label={$t("settings.sync.devices")}
+        description={$t("settings.sync.devicesHint")}
+      >
+        <button
+          class="settings-button"
+          type="button"
+          onclick={() => openDialog("devices")}
+          disabled={busy !== null}
+        >
+          {$t("settings.sync.manageDevices")}
+        </button>
+      </SettingsRow>
+      <SettingsRow
         label={$t("settings.sync.history")}
         description={status.checkpoint
           ? $t("settings.sync.checkpointAt", { time: formatTime(status.checkpoint.createdAt) })
@@ -857,6 +929,80 @@
       loading={busy === "disconnect"}
     >
       {$t("settings.sync.confirmDisconnect")}
+    </PrimaryActionButton>
+  {/snippet}
+</Modal>
+
+<LibraryDevicesDialog
+  open={dialog === "devices"}
+  onClose={closeDialog}
+  onChanged={devicesChanged}
+/>
+
+<Modal
+  open={dialog === "start"}
+  title={$t("settings.sync.start.title")}
+  onClose={closeDialog}
+  showCloseButton={busy === null}
+  containerClass="max-w-lg"
+>
+  <div class="space-y-3 px-6 pt-4 pb-5 text-[13px]">
+    <p class="text-base-content-muted text-xs leading-relaxed">{$t("settings.sync.start.hint")}</p>
+    {#each ["new", "copy", "take_over"] as const as choice (choice)}
+      <label
+        class={`flex cursor-pointer gap-3 rounded-xl border px-3 py-2.5 ${
+          startChoice === choice ? "border-primary bg-primary/5" : "border-base-300"
+        }`}
+      >
+        <input
+          type="radio"
+          name="start-choice"
+          class="mt-0.5"
+          value={choice}
+          checked={startChoice === choice}
+          onchange={() => (startChoice = choice)}
+          disabled={busy !== null}
+        />
+        <span class="min-w-0 flex-1 space-y-1">
+          <span class="text-base-content block font-medium">
+            {$t(`settings.sync.start.${choice}`)}
+          </span>
+          <span class="text-base-content-muted block text-xs leading-relaxed">
+            {$t(`settings.sync.start.${choice}Hint`)}
+          </span>
+          {#if choice !== "new" && startChoice === choice}
+            <SelectField bind:value={startDevice} disabled={busy !== null} fit className="mt-1.5">
+              {#each otherDevices as device (device.id)}
+                <option value={device.id}>
+                  {device.lastBackupAt
+                    ? $t("settings.sync.start.deviceOption", {
+                        name: device.name || device.id.slice(0, 8),
+                        time: formatTime(device.lastBackupAt),
+                      })
+                    : device.name || device.id.slice(0, 8)}
+                </option>
+              {/each}
+            </SelectField>
+          {/if}
+        </span>
+      </label>
+    {/each}
+    {#if startChoice === "take_over"}
+      <p class="text-warning-content bg-warning/10 rounded-xl px-4 py-3 leading-relaxed">
+        {$t("settings.sync.start.takeOverWarning")}
+      </p>
+    {/if}
+    {@render noticeView(true)}
+  </div>
+  {#snippet footer()}
+    {@render cancelButton()}
+    <PrimaryActionButton
+      className="h-8 rounded-lg px-3 py-0 text-[13px]"
+      onclick={start}
+      disabled={busy !== null && busy !== "connect"}
+      loading={busy === "connect"}
+    >
+      {$t("settings.sync.start.continue")}
     </PrimaryActionButton>
   {/snippet}
 </Modal>
