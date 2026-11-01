@@ -22,6 +22,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- In the dark theme, warning, success and info text (for example the warning before a repository update and the Added tag in the list of changes) is light and easy to read.
+
 ### Removed
 
 ## [0.10.0] - 2026-10-29
