@@ -20,7 +20,7 @@ Library sync does not use git merges. Each layout needs the per-item three-way c
 - Scope is set per item: a skill, an instruction template, or a custom agent. It is not set per file.
 - Install state belongs to a device. Each device has `devices/<device-id>.json` with its installs per agent. Shared item records do not have `agents`.
 - A device gets the shared items and its own device-only items. It does not get the device-only items of other devices.
-- A backup that finds the head moved since its base compares each item again against the new head. When no item changed on both sides, the backup commits on top of the new head without user action. Only an item that changed on both sides goes to the restore preview. A device file and the device-only items of a device have one writer, so they do not cause conflicts.
+- A backup that finds the head moved since its base compares each item again against the new head. When no item changed on both sides, the backup commits on top of the new head without user action. Only an item that changed on both sides goes to the restore preview. A device file and the device-only items of a device have one writer, so they do not cause conflicts. The changes that only the head has are not written on this device by the backup. The sync state keeps their repository version, the same as a deferred item, so that a later backup does not revert them. The next restore offers them, selected by default.
 - Device-only is not private. Each person who can read the repository can read all items. Content that must stay private needs a different repository.
 - [ADR 0003](0003-library-sync-id-on-first-merge.md) stays in effect. Ids are unique across all scopes.
 
