@@ -25,6 +25,7 @@ export type AppLocation = {
 /** Panes of the settings page, in nav order (`/settings?section=`). */
 export const SETTINGS_SECTIONS = [
   "general",
+  "account",
   "agents",
   "translation",
   "github",
