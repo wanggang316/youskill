@@ -6,7 +6,11 @@
 //! API of the server.
 
 use crate::models::{FavoriteRecord, FavoriteStore};
+use crate::services::account_service::{AccountManager, AccountServer, SecretStore};
+use crate::services::favorites_service;
 use std::future::Future;
+use std::path::PathBuf;
+use std::time::Duration;
 
 /// The server accepts at most this many changes in one push.
 pub const PUSH_LIMIT: usize = 500;
@@ -142,6 +146,78 @@ async fn push(
     changes = again;
   }
   Ok(())
+}
+
+/// Syncs the favorite store file with the signed-in account, one sync at a time, so a
+/// sign-out cannot clear the store while a sync runs.
+pub struct FavoriteSync {
+  path: PathBuf,
+  running: tokio::sync::Mutex<()>,
+}
+
+impl FavoriteSync {
+  pub fn new(path: PathBuf) -> Self {
+    Self {
+      path,
+      running: tokio::sync::Mutex::new(()),
+    }
+  }
+
+  /// Runs one sync. `None` when no account is signed in. Local changes made while it runs
+  /// stay pending for the next sync.
+  pub async fn run<S, K>(
+    &self,
+    account: &AccountManager<S, K>,
+    server: &impl FavoriteServer,
+  ) -> Result<Option<SyncReport>, SyncError>
+  where
+    S: AccountServer,
+    K: SecretStore,
+  {
+    let _running = self.running.lock().await;
+    self.run_locked(account, server).await
+  }
+
+  /// Pushes the pending changes within `limit` (best effort), then signs out, which clears
+  /// the favorites of this device.
+  pub async fn sign_out<S, K>(
+    &self,
+    account: &AccountManager<S, K>,
+    server: &impl FavoriteServer,
+    limit: Duration,
+  ) -> Result<(), String>
+  where
+    S: AccountServer,
+    K: SecretStore,
+  {
+    let _running = self.running.lock().await;
+    match tokio::time::timeout(limit, self.run_locked(account, server)).await {
+      Ok(Ok(_)) => {},
+      Ok(Err(error)) => tracing::warn!("Favorite sync before sign-out failed: {error:?}"),
+      Err(_) => tracing::warn!("Favorite sync before sign-out timed out"),
+    }
+    account.sign_out().await
+  }
+
+  async fn run_locked<S, K>(
+    &self,
+    account: &AccountManager<S, K>,
+    server: &impl FavoriteServer,
+  ) -> Result<Option<SyncReport>, SyncError>
+  where
+    S: AccountServer,
+    K: SecretStore,
+  {
+    let Some(identity) = account.status().await.identity else {
+      return Ok(None);
+    };
+    let start = favorites_service::read_store(&self.path).map_err(SyncError::Failed)?;
+    let mut store = start.clone();
+    store.begin_account(&identity.account_id);
+    let result = sync(&mut store, server).await;
+    favorites_service::save_synced(&self.path, &start, store).map_err(SyncError::Failed)?;
+    result.map(Some)
+  }
 }
 
 #[cfg(test)]
@@ -592,5 +668,91 @@ mod tests {
     store.apply(record("1", false, 5));
     assert!(store.find("1").unwrap().pending);
     assert_eq!(ids(&store), ["1"]);
+  }
+
+  mod store_sync {
+    use super::*;
+    use crate::services::favorite_api_service::tests::signed_in as account;
+    use std::sync::atomic::Ordering;
+
+    fn block_on<F: Future>(future: F) -> F::Output {
+      tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(future)
+    }
+
+    #[test]
+    fn a_sync_binds_the_store_to_the_account_and_saves_the_result() {
+      let dir = tempfile::tempdir().unwrap();
+      let path = dir.path().join("favorites.json");
+      favorites_service::update_store_for_tests(&path, |store| {
+        add(store, "1", 10);
+      });
+      let (account, _, _) = account(path.clone());
+      let server = FakeServer::new();
+      server.write(record("2", true, 5));
+
+      let report = block_on(FavoriteSync::new(path.clone()).run(&account, &server)).unwrap();
+
+      assert_eq!(report, Some(SyncReport::default()));
+      assert!(server.get("1").unwrap().favorited);
+      let saved = favorites_service::load_store(&path).unwrap();
+      assert_eq!(saved.account_id.as_deref(), Some("12"));
+      assert!(saved.pending().is_empty());
+      assert_eq!(saved.list().len(), 2);
+    }
+
+    #[test]
+    fn no_sync_runs_while_signed_out() {
+      let dir = tempfile::tempdir().unwrap();
+      let path = dir.path().join("favorites.json");
+      let (account, _, _) = account(path.clone());
+      block_on(account.sign_out()).unwrap();
+      let server = FakeServer::new();
+      let report = block_on(FavoriteSync::new(path).run(&account, &server)).unwrap();
+      assert_eq!(report, None);
+      assert!(server.with(|state| state.pulls.is_empty()));
+    }
+
+    #[test]
+    fn a_favorite_added_just_before_sign_out_is_on_the_server_after_it() {
+      let dir = tempfile::tempdir().unwrap();
+      let path = dir.path().join("favorites.json");
+      let (account, sessions, _) = account(path.clone());
+      let server = FakeServer::new();
+      let sync = FavoriteSync::new(path.clone());
+      block_on(sync.run(&account, &server)).unwrap();
+      favorites_service::update_store_for_tests(&path, |store| {
+        add(store, "1", 10);
+      });
+
+      block_on(sync.sign_out(&account, &server, Duration::from_secs(5))).unwrap();
+
+      assert!(server.get("1").unwrap().favorited);
+      assert!(sessions.signed_out.load(Ordering::SeqCst));
+      assert_eq!(block_on(account.status()).identity, None);
+      assert_eq!(
+        favorites_service::load_store(&path).unwrap(),
+        FavoriteStore::default()
+      );
+    }
+
+    #[test]
+    fn sign_out_finishes_when_the_server_is_unreachable() {
+      let dir = tempfile::tempdir().unwrap();
+      let path = dir.path().join("favorites.json");
+      let (account, _, _) = account(path.clone());
+      let server = FakeServer::new();
+      server.with(|state| state.offline = true);
+      favorites_service::update_store_for_tests(&path, |store| {
+        add(store, "1", 10);
+      });
+      block_on(FavoriteSync::new(path.clone()).sign_out(&account, &server, Duration::from_secs(5)))
+        .unwrap();
+      assert_eq!(block_on(account.status()).identity, None);
+      assert!(!path.exists());
+    }
   }
 }

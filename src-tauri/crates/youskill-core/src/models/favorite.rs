@@ -169,6 +169,24 @@ impl FavoriteStore {
     });
   }
 
+  /// Takes the records of `current` that changed after `start`: local changes made while a
+  /// sync of `start` ran. They are newer than the sync result and stay pending.
+  pub fn keep_local_changes(&mut self, start: &FavoriteStore, current: &FavoriteStore) {
+    for item in &current.favorites {
+      if start.find(&item.record.skill_id) == Some(item) {
+        continue;
+      }
+      let index = self
+        .favorites
+        .iter()
+        .position(|kept| kept.record.skill_id == item.record.skill_id);
+      match index {
+        Some(index) => self.favorites[index] = item.clone(),
+        None => self.favorites.push(item.clone()),
+      }
+    }
+  }
+
   /// Prepares the records for a signed-in account. For the same account the pending changes
   /// push as usual. For a new account all records push and the pull starts from no cursor,
   /// so local favorites merge into the account as a union.

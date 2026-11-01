@@ -32,6 +32,28 @@ pub fn set_favorite(
   })
 }
 
+/// Reads the store, for a sync that runs without the lock.
+pub(crate) fn read_store(path: &Path) -> Result<FavoriteStore, String> {
+  let _guard = lock()?;
+  load_store(path)
+}
+
+/// Saves the result of a sync that started from `start`. Local changes made while the sync
+/// ran stay.
+pub(crate) fn save_synced(
+  path: &Path,
+  start: &FavoriteStore,
+  mut synced: FavoriteStore,
+) -> Result<(), String> {
+  let _guard = lock()?;
+  let current = load_store(path)?;
+  synced.keep_local_changes(start, &current);
+  if synced == current {
+    return Ok(());
+  }
+  save_store(path, &synced)
+}
+
 /// Deletes all favorite records, the account binding and the sync cursor of this device.
 pub(crate) fn clear_store(path: &Path) -> Result<(), String> {
   let _guard = lock()?;
@@ -81,6 +103,13 @@ pub(crate) fn save_store(path: &Path, store: &FavoriteStore) -> Result<(), Strin
   let temp = path.with_extension("json.tmp");
   fs::write(&temp, content).map_err(|e| e.to_string())?;
   fs::rename(&temp, path).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+pub(crate) fn update_store_for_tests(path: &Path, change: impl FnOnce(&mut FavoriteStore)) {
+  let mut store = load_store(path).unwrap();
+  change(&mut store);
+  save_store(path, &store).unwrap();
 }
 
 #[cfg(test)]
@@ -164,6 +193,36 @@ mod tests {
       .map(|item| item.record.skill_id)
       .collect();
     assert_eq!(ids, ["2", "3", "1"]);
+  }
+
+  #[test]
+  fn a_local_change_during_a_sync_stays_after_the_sync_saves() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("favorites.json");
+    update_store(&path, |store| {
+      store.set("1", true, Some(snapshot("one")), 1)
+    })
+    .unwrap();
+    let start = read_store(&path).unwrap();
+    let mut synced = start.clone();
+    synced.begin_account("12");
+    synced.favorites[0].pending = false;
+    synced.cursor = Some("4".to_string());
+
+    // While the sync runs, the person removes "1" and adds "2".
+    update_store(&path, |store| store.set("1", false, None, 2)).unwrap();
+    update_store(&path, |store| {
+      store.set("2", true, Some(snapshot("two")), 3)
+    })
+    .unwrap();
+    save_synced(&path, &start, synced).unwrap();
+
+    let saved = load_store(&path).unwrap();
+    assert_eq!(saved.cursor.as_deref(), Some("4"));
+    assert_eq!(saved.account_id.as_deref(), Some("12"));
+    let one = saved.find("1").unwrap();
+    assert!(!one.record.favorited && one.pending);
+    assert!(saved.find("2").unwrap().pending);
   }
 
   #[test]

@@ -13,7 +13,7 @@ serde_yaml = "0.9"
 walkdir = "2"
 dirs-next = "2"
 reqwest = { version = "0.12", features = ["json", "rustls-tls", "blocking"] }
-tokio = { version = "1", features = ["rt", "rt-multi-thread", "fs", "sync"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "fs", "sync", "time"] }
 zip = "2"
 chrono = "0.4"
 uuid = { version = "1", features = ["v4"] }
