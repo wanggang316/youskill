@@ -1853,8 +1853,11 @@ fn migration_writes_one_commit_with_shared_items_and_this_device_file() {
     "nothing is written before the migration"
   );
 
+  assert!(status(&a).unwrap().legacy_base);
+
   let commits = repo.commit_count();
   migrate_with(&a, &repo).unwrap();
+  assert!(!status(&a).unwrap().legacy_base);
   assert_eq!(repo.commit_count(), commits + 1);
   let head = repo.head_commit();
   assert_eq!(repo.parent_of(&head), Some(old));
@@ -1922,6 +1925,60 @@ fn a_computer_with_a_version_1_base_syncs_after_the_migration() {
   assert_eq!(library_at_head(&repo).skills.len(), 2);
   assert_eq!(agents_at_head(&repo).len(), 1);
   assert!(pending(&b).unwrap().is_empty());
+}
+
+#[test]
+fn migration_on_a_moved_head_keeps_the_changes_of_the_other_computer() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| add_skill(a, FOO, "foo", "v1"));
+  install(&b, FOO, &["claude-code"]);
+  downgrade_head(&repo, &[(FOO, &["claude-code"])]);
+  old_app_state(&a, &repo);
+  old_app_state(&b, &repo);
+
+  // An old app on A backs up BAR after B's last sync.
+  let mut library: serde_json::Value =
+    serde_json::from_slice(&repo.head_file(LIBRARY_FILE).unwrap()).unwrap();
+  library["skills"][BAR] = serde_json::json!({
+    "name": "bar", "hash": "h", "importedAt": "t", "updatedAt": "t", "agents": []
+  });
+  commit_files(
+    &repo,
+    repo.files_at(&repo.head_commit(), ""),
+    &[
+      (LIBRARY_FILE, pretty_json(&library).unwrap()),
+      (&format!("skills/{}/bar/SKILL.md", BAR), b"bar".to_vec()),
+    ],
+    "Backup from an old app",
+  );
+
+  migrate_with(&b, &repo).unwrap();
+  let migrated = repo.head_commit();
+  assert_eq!(status_commit(&b), Some(migrated.clone()));
+  assert!(read_state(&b).unwrap().last_backup_at.is_some());
+  assert!(
+    read_state(&b)
+      .unwrap()
+      .incoming
+      .contains_key(&skill_key(BAR)),
+    "BAR is kept for the next restore"
+  );
+  assert!(status(&b).unwrap().changes.is_empty());
+  assert_eq!(
+    backup_with(&b, &repo).unwrap().result,
+    BackupResult::UpToDate
+  );
+  assert_eq!(
+    repo.head_commit(),
+    migrated,
+    "no commit after the migration"
+  );
+
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  let bar = item(&planned, &skill_key(BAR));
+  assert_eq!(bar.resolution, Resolution::TakeRemote);
+  assert!(!bar.deferred);
 }
 
 #[test]
@@ -2286,7 +2343,7 @@ fn first_connect_migration_maps_the_installs_of_paired_items() {
 }
 
 #[test]
-fn a_restore_before_this_device_joined_offers_to_remove_its_installs() {
+fn a_restore_before_this_device_joined_keeps_its_installs() {
   let tmp = tempfile::tempdir().unwrap();
   let repo = FakeRepo::initialized();
   let a = computer(tmp.path(), "a", &["claude-code"]);
@@ -2296,17 +2353,21 @@ fn a_restore_before_this_device_joined_offers_to_remove_its_installs() {
   let b = computer(tmp.path(), "b", &["claude-code"]);
   pull(&b, &repo);
   install(&b, FOO, &["claude-code"]);
+  edit_skill(&b, FOO, "foo", "v2");
   assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
 
+  // The earlier commit has no device file of B: its content comes back, its installs stay.
   let planned = plan_restore_with(&b, &repo, RestoreMode::Pull, Some(&before)).unwrap();
   apply(&b, &repo, &planned, RestoreDecisions::default());
+  assert!(skill_body(&b, FOO, "foo").contains("v1"));
+  assert!(pending(&b).unwrap().is_empty());
   assert_eq!(
-    pending(&b)
-      .unwrap()
-      .iter()
-      .map(|item| (item.action, item.agent_id.as_str()))
-      .collect::<Vec<_>>(),
-    vec![(PendingAction::Uninstall, "claude-code")]
+    device_file(&repo, &b).by_item()[&skill_key(FOO)],
+    vec!["claude-code"]
   );
-  assert!(device_file(&repo, &b).installs.is_empty());
+  assert!(status(&b).unwrap().changes.is_empty());
+  assert_eq!(
+    backup_with(&b, &repo).unwrap().result,
+    BackupResult::UpToDate
+  );
 }

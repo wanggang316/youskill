@@ -191,7 +191,9 @@ migrated once: `backup` returns `migration_required` and `plan_restore` the plan
 `migration_required`, the UI asks for confirmation (other computers must update the app),
 and `migrate` writes one commit with version 2, every item shared, no `agents`, and this
 device's file from its local install records (on a first connect, local items with another
-id are paired with repository items as the merge pairs them). A computer whose base is a version 1 commit
+id are paired with repository items as the merge pairs them). After a sync the migration commit
+becomes the base, as after a backup on a moved head: changes another device made since the
+base become incoming items; with an item changed on both sides the base stays. A computer whose base is a version 1 commit
 reads it as version 2 with every item shared and no installs, reads its custom agents from
 the repository, and adds its device file with its next backup. Releases up to 0.10.0 refuse a
 `library.json` above version 1.
@@ -224,9 +226,9 @@ id and its installs get the repository version; the copy loses its source when i
 repository item's), writes the staged items (symlink installs follow a renamed hub
 directory) and runs the confirmed removals through the normal hub and instruction removal.
 Only when all of these succeed is the base set to the target, with the target's device file
-of this device as the base device file, so the pending list shows what it changes. An
-earlier version 2 commit without that file (from before this device joined) counts as no
-installs; the head without it (no backup yet) and a version 1 commit keep the installs; on a failure the base stays
+of this device as the base device file, so the pending list shows what it changes. A
+target without that file (from before this device joined, a head before its first backup, a
+version 1 commit) keeps the installs as they are; on a failure the base stays
 and the checkpoint undoes what was written. When the result differs from the head (local
 items, kept removals, `keep_local`, a historical target), it is committed on top of the
 head and the branch fast-forwards; a rejected fast-forward returns `stale` with the local

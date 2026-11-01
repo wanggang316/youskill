@@ -743,23 +743,13 @@ pub fn apply_restore_with(
   }
 
   // The base becomes the target. Its device file for this device is the base of the
-  // installs here, so the pending list shows what it changes.
+  // installs here, so the pending list shows what it changes. A target without that file
+  // (from before this device joined, a head before its first backup, a version 1 commit)
+  // says nothing about the installs here, so they stay as they are: a restore of old
+  // content must not offer to uninstall everything.
   let mut next = state.clone();
-  match &planned.target_state.device {
-    Some(device) => next.base_device = Some(device.clone()),
-    // An earlier version 2 commit from before this device joined: no installs there. The
-    // head without the file (no backup yet) and a version 1 commit (no device files at
-    // all) keep the installs as they are.
-    None
-      if target_commit != head.commit
-        && planned.target_state.library.version >= LIBRARY_VERSION =>
-    {
-      next.base_device = Some(DeviceFile {
-        name: state.device_label(),
-        ..DeviceFile::default()
-      });
-    },
-    None => {},
+  if let Some(device) = &planned.target_state.device {
+    next.base_device = Some(device.clone());
   }
   next.last_synced_commit = Some(target_commit.clone());
   next.last_pull_at = Some(now_rfc3339());

@@ -15,14 +15,15 @@ pub fn migrate(env: &Env) -> Result<(), String> {
 }
 
 /// Write the migration commit when the branch head holds a version 1 library. Nothing
-/// happens for a version 2 library or an empty repository. When the head is this
-/// computer's base, the migration commit becomes the base.
+/// happens for a version 2 library or an empty repository. After a sync, the migration
+/// commit becomes the base unless an item changed here and on the head.
 pub fn migrate_with(env: &Env, remote: &dyn RemoteRepo) -> Result<(), String> {
   normalize_library(env)?;
   let _ops = ops_guard(env)?;
   let mut state = read_state(env)?;
   state.connected()?;
   let device = ensure_device(env, &mut state)?;
+  fill_base_agents(env, remote, &mut state)?;
   let Some(head) = remote.head()? else {
     return Ok(());
   };
@@ -126,14 +127,28 @@ pub fn migrate_with(env: &Env, remote: &dyn RemoteRepo) -> Result<(), String> {
     Err(UpdateError::Other(err)) => return Err(err),
   }
 
-  if state.last_synced_commit.as_deref() == Some(head.commit.as_str()) {
-    state.last_synced_commit = Some(commit);
-    state.base_files = tree;
-    state.base_library = Some(library);
-    state.base_agents = Some(agents);
-    state.base_device = Some(device_file);
-    state.base_local_agents = local_agents;
-    write_state(env, &state)?;
+  // The migration commit becomes the base, the same as after a backup on a moved head: the
+  // changes another device made since the base are kept for the next restore. When an item
+  // changed on both sides the base stays, and the next restore decides.
+  state.last_backup_at = device_file.last_backup_at.clone();
+  if state.last_synced_commit.is_some() {
+    let snapshot = local_snapshot(env, &state, &device)?;
+    let migrated = RepoState {
+      library: library.clone(),
+      agents: agents.clone(),
+      files: tree.clone(),
+      device: Some(device_file.clone()),
+    };
+    if let Some(next) = rebase(&state, &state.base(), &snapshot, &migrated, &device) {
+      state.incoming = next.incoming;
+      state.deferred = next.deferred;
+      state.last_synced_commit = Some(commit);
+      state.base_files = tree;
+      state.base_library = Some(library);
+      state.base_agents = Some(agents);
+      state.base_device = Some(device_file);
+      state.base_local_agents = local_agents;
+    }
   }
-  Ok(())
+  write_state(env, &state)
 }
