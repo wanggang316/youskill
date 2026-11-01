@@ -42,6 +42,14 @@ export function signOutAccount(): Promise<AccountStatus> {
   return apiCall("account_sign_out");
 }
 
+/**
+ * Deletes the account on the server and the account data of this device. The result has the
+ * status after the attempt and the failure to show, if any.
+ */
+export function deleteAccount(): Promise<AccountChanged> {
+  return apiCall("account_delete");
+}
+
 /** The result of a sign-in callback, or a session that the server revoked. */
 export function onAccountChanged(handler: (event: AccountChanged) => void): Promise<UnlistenFn> {
   return listen<AccountChanged>("account://changed", (event) => handler(event.payload));

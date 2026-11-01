@@ -744,6 +744,13 @@ const translations: Record<string, Dictionary> = {
     "settings.account.signingOut": "Signing out...",
     "settings.account.signOutHint":
       "Sign-out removes the favorites from this computer. They stay in your account.",
+    "settings.account.deleteAccount": "Delete account",
+    "settings.account.deleteAccountHint":
+      "Deletes the account and its favorites on the server, and the favorites on this computer.",
+    "settings.account.deleteTitle": "Delete account?",
+    "settings.account.deleteDescription":
+      "The account, its sign-ins and all its favorites are deleted from the server. This is permanent and cannot be undone. This computer signs out and its favorites are removed.",
+    "settings.account.deleteConfirm": "Delete permanently",
     "settings.github.title": "GitHub",
     "settings.github.description": "Use the GitHub gh CLI to manage your private skills",
     "settings.github.noGhTitle": "GitHub CLI is not installed",
@@ -1512,6 +1519,12 @@ const translations: Record<string, Dictionary> = {
     "settings.account.signOut": "退出登录",
     "settings.account.signingOut": "正在退出...",
     "settings.account.signOutHint": "退出登录会删除本机的收藏，账户中的收藏不受影响。",
+    "settings.account.deleteAccount": "删除账户",
+    "settings.account.deleteAccountHint": "删除服务器上的账户及其收藏，并删除本机的收藏。",
+    "settings.account.deleteTitle": "删除账户？",
+    "settings.account.deleteDescription":
+      "服务器上的账户、登录方式和全部收藏都会被删除。此操作是永久性的，无法撤销。本机将退出登录并删除收藏。",
+    "settings.account.deleteConfirm": "永久删除",
     "settings.github.title": "GitHub",
     "settings.github.description": "使用 GitHub gh CLI 管理您的私有 Skill",
     "settings.github.noGhTitle": "未安装 GitHub CLI",

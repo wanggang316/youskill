@@ -1,7 +1,9 @@
 <script lang="ts">
   import { onMount } from "svelte";
-  import { Github, Loader2 } from "@lucide/svelte";
+  import { AlertTriangle, Github, Loader2 } from "@lucide/svelte";
   import type { AccountProvider } from "$lib/api";
+  import Modal from "$lib/components/ui/Modal.svelte";
+  import PrimaryActionButton from "$lib/components/ui/PrimaryActionButton.svelte";
   import { t } from "$lib/i18n";
   import { account, accountState } from "$lib/stores/account";
   import SettingsPane from "./SettingsPane.svelte";
@@ -12,9 +14,17 @@
     { key: "apple", label: $t("settings.account.signInWithApple") },
   ]);
 
+  let confirmingDelete = $state(false);
+
   onMount(() => {
     void account.load();
   });
+
+  async function confirmDelete() {
+    await account.deleteAccount();
+    // A failure shows on the page, where the person can try again.
+    confirmingDelete = false;
+  }
 </script>
 
 <SettingsPane title={$t("settings.account.title")} description={$t("settings.account.description")}>
@@ -48,6 +58,21 @@
         </SettingsRow>
       </div>
       <p class="text-base-content-muted px-1 text-xs">{$t("settings.account.signOutHint")}</p>
+      <div class="settings-card">
+        <SettingsRow
+          label={$t("settings.account.deleteAccount")}
+          description={$t("settings.account.deleteAccountHint")}
+        >
+          <button
+            class="settings-button text-error"
+            type="button"
+            onclick={() => (confirmingDelete = true)}
+            disabled={$accountState.deleting || $accountState.signingOut}
+          >
+            {$t("settings.account.deleteAccount")}
+          </button>
+        </SettingsRow>
+      </div>
     </div>
   {:else}
     <div class="settings-card">
@@ -87,3 +112,27 @@
     <p class="text-error text-[13px] break-all">{$accountState.error}</p>
   {/if}
 </SettingsPane>
+
+<Modal
+  bind:open={confirmingDelete}
+  title={$t("settings.account.deleteTitle")}
+  containerClass="max-w-md"
+>
+  <div class="text-error flex items-start gap-2 px-6 pt-2 pb-6 text-sm">
+    <AlertTriangle size={18} class="mt-0.5 shrink-0" />
+    <p class="text-base-content">{$t("settings.account.deleteDescription")}</p>
+  </div>
+  {#snippet footer()}
+    <button
+      class="border-base-300 text-base-content hover:bg-base-200 rounded-xl border px-4 py-2 text-sm transition"
+      type="button"
+      onclick={() => (confirmingDelete = false)}
+      disabled={$accountState.deleting}
+    >
+      {$t("common.cancel")}
+    </button>
+    <PrimaryActionButton onclick={confirmDelete} loading={$accountState.deleting} variant="danger">
+      {$t("settings.account.deleteConfirm")}
+    </PrimaryActionButton>
+  {/snippet}
+</Modal>
