@@ -20,7 +20,13 @@ pub async fn account_status(
 /// Starts a sign-in and returns the URL for the system browser. The result arrives as an
 /// `account://changed` event after the `youskill://auth/callback` link.
 #[tauri::command]
-pub fn account_sign_in(account: State<'_, Account>, provider: Provider) -> Result<String, String> {
+pub fn account_sign_in(
+  account: State<'_, Account>,
+  last_error: State<'_, LastError>,
+  provider: Provider,
+) -> Result<String, String> {
+  // A failure of an earlier sign-in must not show for this one.
+  last_error.take();
   account.begin_sign_in(provider)
 }
 

@@ -322,9 +322,12 @@ event after a callback or a revoked session. `AccountManager::access_token` refr
 when the token expires within 60 seconds, and `refresh_rejected` after a `401`; one async
 mutex holds the session across the refresh, so only one refresh runs at a time and the
 rotated refresh token replaces the old one before the lock is released. A `401` on
-refresh deletes the session and keeps `favorites.json`. Sign-out revokes the session on
-the server (best effort), deletes the keychain items, and deletes `favorites.json`
-(favorites, account binding and cursor).
+refresh deletes the session and keeps `favorites.json`. A new session goes to memory
+before the keychain, so a failed keychain save cannot bring back a rotated refresh token.
+Sign-out refreshes an expired access token first, deletes the keychain items and
+`favorites.json` (favorites, account binding and cursor), then revokes the session on the
+server (best effort) without the session lock. A cancel (`access_denied`) of a sign-in that
+a newer one replaced is ignored; a new sign-in clears the last callback error.
 
 ## Global Search
 

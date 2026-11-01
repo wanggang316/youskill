@@ -235,17 +235,24 @@ impl<S: AccountServer, K: SecretStore> AccountManager<S, K> {
     let Some(pending) = pending else {
       return Ok(CallbackOutcome::Ignored);
     };
+    let cancelled = callback.error.as_deref() == Some("access_denied");
     if callback.state.as_deref() != Some(pending.state.as_str()) {
-      // Keep the pending sign-in: the real callback can still arrive.
+      // Keep the pending sign-in: the real callback can still arrive. A cancel of a sign-in
+      // that a newer one replaced is no error.
+      if cancelled {
+        return Ok(CallbackOutcome::Ignored);
+      }
       return Err("The sign-in response does not match this sign-in. Try again.".to_string());
     }
     // The code is single-use, so the pending sign-in is too.
     self.secrets.delete(PENDING_KEY)?;
+    if cancelled {
+      return Ok(CallbackOutcome::Cancelled);
+    }
     if (self.now)() - pending.created_at > PENDING_TTL_SECS {
       return Err("The sign-in took too long. Try again.".to_string());
     }
     match (callback.code, callback.error) {
-      (_, Some(error)) if error == "access_denied" => Ok(CallbackOutcome::Cancelled),
       (_, Some(error)) => Err(format!("Sign-in failed ({error}). Try again.")),
       (Some(code), None) => {
         let response = self
@@ -260,9 +267,8 @@ impl<S: AccountServer, K: SecretStore> AccountManager<S, K> {
           })?;
         let mut session = self.session.lock().await;
         let stored = self.stored(response, pending.provider);
-        self.secrets.save(SESSION_KEY, &to_json(&stored)?)?;
         let signed_in = identity(&stored);
-        *session = Some(stored);
+        self.keep(&mut session, stored);
         Ok(CallbackOutcome::SignedIn(signed_in))
       },
       (None, None) => Err("The sign-in response has no code. Try again.".to_string()),
@@ -300,14 +306,8 @@ impl<S: AccountServer, K: SecretStore> AccountManager<S, K> {
     match self.server.refresh(&current.refresh_token).await {
       Ok(response) => {
         let stored = self.stored(response, current.provider);
-        // The old refresh token no longer works, so the new one must be kept.
-        let json = to_json(&stored).map_err(AccountError::Failed)?;
-        self
-          .secrets
-          .save(SESSION_KEY, &json)
-          .map_err(AccountError::Failed)?;
         let token = stored.access_token.clone();
-        *session = Some(stored);
+        self.keep(session, stored);
         Ok(token)
       },
       Err(ServerError::Unauthorized) => {
@@ -327,15 +327,50 @@ impl<S: AccountServer, K: SecretStore> AccountManager<S, K> {
   /// Revokes the session on the server (best effort), deletes the tokens, and clears the
   /// favorites and the sync cursor of this device.
   pub async fn sign_out(&self) -> Result<(), String> {
-    let mut session = self.session.lock().await;
-    if let Some(current) = session.take() {
-      if let Err(error) = self.server.sign_out(&current.access_token).await {
+    let token = {
+      let mut session = self.session.lock().await;
+      let token = self.revocable_token(&mut session).await;
+      *session = None;
+      token
+    };
+    let cleared = self
+      .secrets
+      .delete(SESSION_KEY)
+      .and_then(|()| self.secrets.delete(PENDING_KEY))
+      .and_then(|()| favorites_service::clear_store(&self.favorites_path));
+    // The lock is released: a slow server does not block other callers.
+    if let Some(token) = token {
+      if let Err(error) = self.server.sign_out(&token).await {
         tracing::warn!("Failed to revoke the account session: {error:?}");
       }
     }
-    self.secrets.delete(SESSION_KEY)?;
-    self.secrets.delete(PENDING_KEY)?;
-    favorites_service::clear_store(&self.favorites_path)
+    cleared
+  }
+
+  /// An access token the server accepts for sign-out. An expired one refreshes first, so the
+  /// refresh token is revoked too. `None` when the server already revoked the session.
+  async fn revocable_token(&self, session: &mut Option<StoredSession>) -> Option<String> {
+    let current = session.as_ref()?;
+    if (self.now)() + REFRESH_MARGIN_SECS < current.expires_at {
+      return Some(current.access_token.clone());
+    }
+    let expired = current.access_token.clone();
+    match self.refresh_locked(session).await {
+      Ok(token) => Some(token),
+      Err(AccountError::SignedOut) => None,
+      // Try anyway: the token can still be valid within the margin.
+      Err(AccountError::Failed(_)) => Some(expired),
+    }
+  }
+
+  /// Keeps a new session in memory first: the server rotated the refresh token, so a failed
+  /// save must not bring back the old one. It is then kept for the next start.
+  fn keep(&self, session: &mut Option<StoredSession>, stored: StoredSession) {
+    let saved = to_json(&stored).and_then(|json| self.secrets.save(SESSION_KEY, &json));
+    if let Err(error) = saved {
+      tracing::warn!("Failed to keep the account session in the keychain: {error}");
+    }
+    *session = Some(stored);
   }
 
   fn stored(&self, response: SessionResponse, provider: Provider) -> StoredSession {
@@ -536,19 +571,22 @@ mod tests {
   use super::*;
   use crate::models::{FavoriteSnapshot, FavoriteStore};
   use std::collections::HashMap;
-  use std::sync::atomic::{AtomicI64, Ordering};
+  use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
   use std::sync::{Arc, Mutex};
 
   const BASE: &str = "https://api.example.test";
 
   #[derive(Default)]
-  struct MemorySecrets(Mutex<HashMap<String, String>>);
+  struct MemorySecrets(Mutex<HashMap<String, String>>, AtomicBool);
 
   impl SecretStore for Arc<MemorySecrets> {
     fn load(&self, key: &str) -> Result<Option<String>, String> {
       Ok(self.0.lock().unwrap().get(key).cloned())
     }
     fn save(&self, key: &str, value: &str) -> Result<(), String> {
+      if self.1.load(Ordering::SeqCst) {
+        return Err("keychain locked".to_string());
+      }
       self
         .0
         .lock()
@@ -577,6 +615,9 @@ mod tests {
     refreshes: u32,
     exchanges: Vec<(String, String)>,
     offline: bool,
+    /// Access tokens and their expiry, in the clock of the test.
+    access: HashMap<String, i64>,
+    clock: Arc<AtomicI64>,
   }
 
   impl FakeServer {
@@ -590,8 +631,13 @@ mod tests {
       self.issued += 1;
       let refresh_token = format!("refresh-{}", self.issued);
       self.valid_refresh = vec![refresh_token.clone()];
+      let access_token = format!("access-{}", self.issued);
+      self.access.insert(
+        access_token.clone(),
+        self.clock.load(Ordering::SeqCst) + 900,
+      );
       SessionResponse {
-        access_token: format!("access-{}", self.issued),
+        access_token,
         expires_in: 900,
         refresh_token,
         account: Account {
@@ -655,6 +701,11 @@ mod tests {
         if state.offline {
           return Err(ServerError::Failed("offline".to_string()));
         }
+        let now = state.clock.load(Ordering::SeqCst);
+        match state.access.get(access_token) {
+          Some(expires_at) if *expires_at > now => {},
+          _ => return Err(ServerError::Unauthorized),
+        }
         state.revoked_access.push(access_token.to_string());
         state.valid_refresh.clear();
         Ok(())
@@ -673,10 +724,13 @@ mod tests {
   impl Setup {
     fn new() -> Self {
       let dir = tempfile::tempdir().unwrap();
+      let clock = Arc::new(AtomicI64::new(1_000));
+      let server = Arc::<FakeServer>::default();
+      server.with(|state| state.clock = clock.clone());
       Self {
-        server: Arc::default(),
+        server,
         secrets: Arc::default(),
-        clock: Arc::new(AtomicI64::new(1_000)),
+        clock,
         favorites: dir.path().join("favorites.json"),
         _dir: dir,
       }
@@ -1079,6 +1133,106 @@ mod tests {
     block_on(manager.sign_out()).unwrap();
     assert!(setup.secret(SESSION_KEY).is_none());
     assert_eq!(block_on(manager.status()).identity, None);
+  }
+
+  #[test]
+  fn sign_out_after_the_access_token_expired_refreshes_and_revokes() {
+    let setup = Setup::new();
+    let manager = signed_in(&setup);
+    setup.advance(900);
+    block_on(manager.sign_out()).unwrap();
+    assert_eq!(
+      setup.server.with(|state| state.revoked_access.clone()),
+      ["access-2"]
+    );
+    assert!(setup.server.with(|state| state.valid_refresh.is_empty()));
+    assert!(setup.secret(SESSION_KEY).is_none());
+    assert_eq!(block_on(manager.status()).identity, None);
+  }
+
+  #[test]
+  fn sign_out_of_a_revoked_session_clears_locally_without_a_revoke() {
+    let setup = Setup::new();
+    let manager = signed_in(&setup);
+    setup.server.with(|state| state.valid_refresh.clear());
+    setup.advance(900);
+    block_on(manager.sign_out()).unwrap();
+    assert!(setup.server.with(|state| state.revoked_access.is_empty()));
+    assert!(setup.secret(SESSION_KEY).is_none());
+    assert_eq!(block_on(manager.status()).identity, None);
+  }
+
+  #[test]
+  fn a_failed_keychain_save_keeps_the_rotated_refresh_token_in_memory() {
+    let setup = Setup::new();
+    let manager = signed_in(&setup);
+    setup.secrets.1.store(true, Ordering::SeqCst);
+    setup.advance(900);
+    assert_eq!(block_on(manager.access_token()).unwrap(), "access-2");
+    // The next refresh uses the rotated token; the old one would revoke the session.
+    setup.advance(900);
+    assert_eq!(block_on(manager.access_token()).unwrap(), "access-3");
+    assert!(block_on(manager.status()).identity.is_some());
+  }
+
+  #[test]
+  fn a_failed_keychain_save_at_sign_in_still_signs_in() {
+    let setup = Setup::new();
+    let manager = setup.manager();
+    let start = manager.begin_sign_in(Provider::Github).unwrap();
+    let link = setup.browser(&start, "code-1");
+    setup.secrets.1.store(true, Ordering::SeqCst);
+    assert!(matches!(
+      block_on(manager.complete_sign_in(&link)).unwrap(),
+      CallbackOutcome::SignedIn(_)
+    ));
+    assert_eq!(block_on(manager.access_token()).unwrap(), "access-1");
+  }
+
+  #[test]
+  fn a_cancel_of_a_replaced_sign_in_is_ignored_and_keeps_the_new_one() {
+    let setup = Setup::new();
+    let manager = setup.manager();
+    let old = manager.begin_sign_in(Provider::Github).unwrap();
+    let old_state = state_of(&old);
+    let start = manager.begin_sign_in(Provider::Github).unwrap();
+    let cancel = format!("{REDIRECT_URI}?error=access_denied&state={old_state}");
+    assert_eq!(
+      block_on(manager.complete_sign_in(&cancel)).unwrap(),
+      CallbackOutcome::Ignored
+    );
+    let link = setup.browser(&start, "code-1");
+    assert!(matches!(
+      block_on(manager.complete_sign_in(&link)).unwrap(),
+      CallbackOutcome::SignedIn(_)
+    ));
+  }
+
+  #[test]
+  fn a_late_cancel_is_still_a_cancel() {
+    let setup = Setup::new();
+    let manager = setup.manager();
+    let start = manager.begin_sign_in(Provider::Apple).unwrap();
+    setup.advance(PENDING_TTL_SECS + 1);
+    let cancel = format!(
+      "{REDIRECT_URI}?error=access_denied&state={}",
+      state_of(&start)
+    );
+    assert_eq!(
+      block_on(manager.complete_sign_in(&cancel)).unwrap(),
+      CallbackOutcome::Cancelled
+    );
+    assert!(setup.secret(PENDING_KEY).is_none());
+  }
+
+  fn state_of(start: &str) -> String {
+    Url::parse(start)
+      .unwrap()
+      .query_pairs()
+      .find(|(key, _)| key == "state")
+      .unwrap()
+      .1
+      .into_owned()
   }
 
   /// One HTTP exchange against a local socket: returns the raw request.
