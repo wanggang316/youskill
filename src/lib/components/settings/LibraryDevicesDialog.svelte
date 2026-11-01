@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from "svelte";
   import { Check, Copy, Loader2, Pencil, X } from "@lucide/svelte";
   import {
     copyDeviceItem,
@@ -46,8 +47,9 @@
 
   const receivers = $derived(devices.filter((device) => device.id !== removing?.id));
 
+  // Load on open only; `load` reads and writes `busy`, which must not rerun this effect.
   $effect(() => {
-    if (open) void load();
+    if (open) untrack(() => void load());
   });
 
   const formatTime = (value?: string) => {

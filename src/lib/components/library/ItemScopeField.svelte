@@ -59,7 +59,7 @@
     ]}
     value={current}
     onChange={change}
-    className="text-xs"
+    className="shrink-0 text-xs whitespace-nowrap"
   />
 {/snippet}
 

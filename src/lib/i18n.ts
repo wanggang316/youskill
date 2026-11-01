@@ -197,7 +197,7 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.device.remove": "Remove",
     "settings.sync.device.removeTitle": "Remove {name}?",
     "settings.sync.device.removeHint":
-      "Deletes the device file of this computer from the repository in one commit. Choose what happens to each of its device-only items. The Git history keeps the old content.",
+      "Deletes its device file from the repository in one commit. Choose what happens to each of its device-only items. The Git history keeps the old content.",
     "settings.sync.device.choice.share": "Share with all computers",
     "settings.sync.device.choice.give": "Give to {name}",
     "settings.sync.device.choice.delete": "Delete",
@@ -965,7 +965,7 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.device.remove": "移除",
     "settings.sync.device.removeTitle": "移除 {name}？",
     "settings.sync.device.removeHint":
-      "用一次提交从仓库删除这台电脑的设备文件。请为它的每个独有项选择处理方式。Git 历史会保留旧内容。",
+      "用一次提交从仓库删除它的设备文件。请为它的每个独有项选择处理方式。Git 历史会保留旧内容。",
     "settings.sync.device.choice.share": "共享给所有电脑",
     "settings.sync.device.choice.give": "转给 {name}",
     "settings.sync.device.choice.delete": "删除",
