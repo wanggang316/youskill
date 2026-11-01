@@ -516,7 +516,8 @@ impl HttpAccountServer {
   }
 }
 
-async fn check(
+/// The response of a successful request, or the error its status maps to.
+pub(crate) async fn check(
   result: Result<reqwest::Response, reqwest::Error>,
 ) -> Result<reqwest::Response, ServerError> {
   let response =
