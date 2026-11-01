@@ -83,3 +83,16 @@ _Avoid_: Skipped item
 The local copy of the lock files, sync state and changed hub files taken before a restore.
 Undo puts it back; the repository is not changed.
 _Avoid_: Snapshot, backup
+
+### Favorites
+
+**Favorite**:
+A marketplace skill that a person marks to revisit, identified by its marketplace id. A hub
+skill is not a favorite. Favorites sync across devices through a server account; see
+`youskill-web/docs/decisions/0001-user-accounts-for-favorite-sync.md`.
+_Avoid_: Bookmark, collection, star
+
+**Local favorite**:
+A favorite stored only on this device. It needs no account and merges into the account at
+sign-in.
+_Avoid_: Guest favorite
