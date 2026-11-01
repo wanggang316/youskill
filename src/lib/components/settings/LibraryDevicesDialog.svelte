@@ -45,7 +45,10 @@
   let removing = $state<DeviceInfo | null>(null);
   let choices = $state<Record<string, string>>({});
 
-  const receivers = $derived(devices.filter((device) => device.id !== removing?.id));
+  /** Devices that can receive an item: this computer and those with a device file. */
+  const receivers = $derived(
+    devices.filter((device) => device.id !== removing?.id && (device.hasFile || device.thisDevice))
+  );
 
   // Load on open only; `load` reads and writes `busy`, which must not rerun this effect.
   $effect(() => {
