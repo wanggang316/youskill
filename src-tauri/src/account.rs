@@ -26,6 +26,23 @@ pub struct AccountChanged {
   pub error: Option<String>,
 }
 
+/// The last sign-in failure, kept until the frontend reads it: a link that starts the app is
+/// handled before the page listens for `CHANGED_EVENT`.
+#[derive(Default)]
+pub struct LastError(std::sync::Mutex<Option<String>>);
+
+impl LastError {
+  pub fn take(&self) -> Option<String> {
+    self.0.lock().ok().and_then(|mut error| error.take())
+  }
+
+  fn set(&self, error: Option<String>) {
+    if let Ok(mut current) = self.0.lock() {
+      *current = error;
+    }
+  }
+}
+
 /// Tokens and the pending sign-in, one keychain item per key.
 pub struct Keychain;
 
@@ -68,6 +85,7 @@ pub fn setup(app: &App) -> Result<(), String> {
     system_clock(),
   );
   app.manage(account);
+  app.manage(LastError::default());
 
   // Windows installers and macOS bundles register the scheme; Linux and Windows dev builds
   // must register it at run time.
@@ -109,6 +127,7 @@ fn handle_link(app: &AppHandle, link: String) {
       Ok(CallbackOutcome::SignedIn(_) | CallbackOutcome::Cancelled) => None,
       Err(error) => Some(error),
     };
+    app.state::<LastError>().set(error.clone());
     if let Some(window) = app.get_webview_window("main") {
       let _ = window.show();
       let _ = window.unminimize();

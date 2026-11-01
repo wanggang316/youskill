@@ -59,8 +59,9 @@ export function createAccount(
       });
       await listening;
       try {
-        const status = await api.status();
+        const { status, error } = await api.status();
         patch({ identity: status.identity, loaded: true });
+        if (error) patch({ signingIn: null, error });
       } catch (error) {
         patch({ loaded: true, error: message(error) });
       }

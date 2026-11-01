@@ -27,7 +27,8 @@ export interface AccountChanged {
   error: string | null;
 }
 
-export function getAccountStatus(): Promise<AccountStatus> {
+/** The status, with the last sign-in failure that is not shown yet. */
+export function getAccountStatus(): Promise<AccountChanged> {
   return apiCall("account_status");
 }
 

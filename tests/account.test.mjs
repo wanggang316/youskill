@@ -13,13 +13,13 @@ const { createAccount } = await server.ssrLoadModule("/src/lib/stores/account.ts
 const octo = { accountId: "12", provider: "github", displayName: "octo" };
 
 /** A fake backend: the test sends account change events by hand. */
-function setup({ identity = null, failStart = false } = {}) {
+function setup({ identity = null, failStart = false, lastError = null } = {}) {
   let emit = () => {};
   const opened = [];
   let signedOut = 0;
   const account = createAccount(
     {
-      status: async () => ({ identity }),
+      status: async () => ({ status: { identity }, error: lastError }),
       start: async (provider) => {
         if (failStart) throw new Error("no keychain");
         return `https://api.example.test/api/account/sign-in/${provider}`;
@@ -100,4 +100,10 @@ test("a session the server revoked shows signed out", async () => {
   await account.load();
   emit({ status: { identity: null }, error: null });
   assert.equal(read().identity, null);
+});
+
+test("a failure of a link that started the app shows after the load", async () => {
+  const { account, read } = setup({ lastError: "Sign-in failed (server_error). Try again." });
+  await account.load();
+  assert.equal(read().error, "Sign-in failed (server_error). Try again.");
 });

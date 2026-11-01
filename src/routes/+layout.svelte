@@ -21,6 +21,7 @@
   import WorkspaceModal from "$lib/components/WorkspaceModal.svelte";
   import { getAppLocation } from "$lib/navigation/app-shell";
   import { goBack, goForward } from "$lib/navigation/history";
+  import { account } from "$lib/stores/account";
   import { loadHomePath } from "$lib/stores/env";
   import {
     checkAllSourceUpdates,
@@ -123,6 +124,8 @@
       })
       .catch(console.error);
     refreshInstructions().catch(console.error);
+    // Follows sign-in callbacks from the start, also while Settings is closed.
+    void account.load();
     ensureUpdateChecked().catch(console.error);
     const stopAutomaticUpdateChecks = startAutomaticUpdateChecks({
       onFocus: (listener) =>

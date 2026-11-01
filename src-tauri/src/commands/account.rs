@@ -1,13 +1,20 @@
 //! Account sign-in and sign-out. The tokens stay in the backend; the frontend gets only the
 //! identity.
 
-use crate::account::{emit_changed, Account};
+use crate::account::{emit_changed, Account, AccountChanged, LastError};
 use tauri::{AppHandle, State};
 use youskill_core::services::account_service::{AccountStatus, Provider};
 
+/// The status and the last sign-in failure that is not shown yet.
 #[tauri::command]
-pub async fn account_status(account: State<'_, Account>) -> Result<AccountStatus, String> {
-  Ok(account.status().await)
+pub async fn account_status(
+  account: State<'_, Account>,
+  last_error: State<'_, LastError>,
+) -> Result<AccountChanged, String> {
+  Ok(AccountChanged {
+    status: account.status().await,
+    error: last_error.take(),
+  })
 }
 
 /// Starts a sign-in and returns the URL for the system browser. The result arrives as an
