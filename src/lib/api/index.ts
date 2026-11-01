@@ -58,6 +58,7 @@ export async function apiCall<T>(command: string, payload?: unknown): Promise<T>
 // 导出 API 模块
 export * from "./agent-apps";
 export * from "./cli";
+export * from "./favorites";
 export * from "./github";
 export * from "./hub";
 export * from "./instructions";

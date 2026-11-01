@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The app checks for app updates when the window gets focus and every hour, at most once each hour, and shows the Update button in the top bar when a release is found ([#54](https://github.com/wanggang316/youskill/issues/54)).
 - Restore from the GitHub backup merges item by item: changes on one side are taken automatically, items changed on both sides are conflicts (keep local, take remote or keep both), remote removals need confirmation, and selected items can be left out. A first connect to a repository with a library offers merge, replace local or replace remote, and recognizes equal items with different ids. A restore can also bring back an earlier backup, and the last restore can be undone on this computer ([#60](https://github.com/wanggang316/youskill/issues/60)).
+- Favorite marketplace skills from the list or the detail page, without an account, and see them in the new Favorites view of the Marketplace. A favorite whose skill left the marketplace shows as unavailable with its saved name and source and can be removed ([#63](https://github.com/wanggang316/youskill/issues/63)).
 
 ### Changed
 

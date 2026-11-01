@@ -19,6 +19,7 @@ Code is the source of truth; when this document and the code disagree, fix the d
   .sync-checkpoint/       # copies taken before the last restore, for undo
 
 <config_dir>/youskill/    # app config, custom agent apps, registered projects (unchanged)
+  favorites.json          # local favorites of marketplace skills, cursor and synced account
 ```
 
 Agent apps are defined in `src-tauri/crates/youskill-core/src/services/agent_apps_service.rs`. Each app has a
@@ -217,6 +218,24 @@ After a restore, `pending` lists user-level installs, uninstalls and copy update
 match the library; `apply_pending` runs the selected ones through the normal install
 actions without force. Project installs are not synced.
 
+## Favorites (`favorites_service`, `favorite_sync_service`)
+
+A favorite is a marketplace skill, keyed by its marketplace id. `favorites.json` holds one
+record per skill: favorite state, `updatedAt` (client milliseconds), a snapshot (name,
+source, description) and a `pending` flag for changes not sent to an account. A removal
+stays as a pending tombstone until a sync confirms it. Favorites work without an account;
+the Marketplace has a Favorites view and a heart toggle in the list and the detail page. A
+favorite whose skill lookup returns 404 shows as unavailable from its snapshot.
+
+`favorite_sync_service::sync` pushes pending records, then pulls from the stored cursor
+until the server has no more pages. A server record replaces the local one unless a newer
+local change is still pending (last write wins on `updatedAt`). A rejected add (limit) is
+reverted and reported. `Unauthorized` leaves the records as they are. `begin_account`
+marks all records pending and clears the cursor when the account changes, so the first
+sign-in merges local favorites as a union. The engine talks to the server through the
+`FavoriteServer` trait; the HTTP client, sign-in and token storage wait for the server API
+(youskill-web#68).
+
 ## Global Search
 
 `search_service::search(env, query, user_name)` searches hub skills (name, description,
@@ -243,6 +262,7 @@ helpers of `navigation/app-shell.ts`.
 | Instructions | `list_instructions`, `get_instruction`, `read_instruction`, `write_instruction`, `rename_instruction`, `import_instructions`, `create_instruction`, `detect_instruction_files`, `detect_instruction_github`, `install_instruction`, `uninstall_instruction`, `remove_instruction`, `sync_instruction`, `diff_instruction`, `list_instruction_files`, `read_instruction_file`, `write_instruction_file` |
 | Projects     | `list_user_projects`, `add_user_project`, `update_user_project`, `remove_user_project`, `list_workspaces`, `add_workspace`, `remove_workspace`, `scan_workspace`, `register_projects`, `list_memory_files`                                                                                                                                                                                             |
 | Search       | `global_search`                                                                                                                                                                                                                                                                                                                                                                                        |
+| Favorites    | `list_favorites`, `set_favorite`                                                                                                                                                                                                                                                                                                                                                                       |
 | Detection    | `detect_github_manual`, `detect_github_auto`, `detect_zip`, `detect_folder` (stage into a temp dir)                                                                                                                                                                                                                                                                                                    |
 | Other        | marketplace, agent apps, projects, settings, library sync, file readers, translation                                                                                                                                                                                                                                                                                                                   |
 
