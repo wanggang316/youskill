@@ -2643,3 +2643,209 @@ fn a_copy_of_another_devices_item_gets_a_new_id_and_this_owner() {
   assert_other_device_kept(&repo);
   assert!(status(&a).unwrap().changes.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// Devices
+// ---------------------------------------------------------------------------
+
+#[test]
+fn devices_list_this_computer_first_with_their_items() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  install(&a, FOO, &["claude-code"]);
+  backup_with(&a, &repo).unwrap();
+  add_other_device(&repo);
+
+  let list = devices_with(&a, &repo).unwrap();
+  assert_eq!(list.len(), 2);
+  assert!(list[0].this_device && list[0].has_file);
+  assert_eq!(list[0].name, "a");
+  assert_eq!(list[0].install_count, 1);
+  assert!(list[0].last_backup_at.is_some());
+  assert!(list[0].items.is_empty());
+  assert_eq!(list[1].id, OTHER_DEVICE);
+  assert_eq!(list[1].name, "other");
+  assert_eq!(
+    list[1]
+      .items
+      .iter()
+      .map(|item| item.key.clone())
+      .collect::<Vec<_>>(),
+    vec![skill_key(OTHER_SKILL), agent_key("their-agent")]
+  );
+}
+
+#[test]
+fn a_renamed_device_writes_its_name_on_the_next_backup() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  backup_with(&a, &repo).unwrap();
+  assert!(rename_device(&a, "  ").is_err());
+  let renamed = rename_device(&a, "Studio").unwrap();
+  assert_eq!(renamed.device_name.as_deref(), Some("Studio"));
+  assert_eq!(renamed.changes.len(), 1);
+  assert_eq!(renamed.changes[0].kind, ItemKind::Device);
+  backup_with(&a, &repo).unwrap();
+  assert_eq!(device_file(&repo, &a).name, "Studio");
+}
+
+#[test]
+fn take_over_gets_the_id_installs_and_items_of_the_old_device() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  add_skill(&a, BAR, "bar", "v1");
+  install(&a, FOO, &["claude-code"]);
+  install(&a, BAR, &["claude-code"]);
+  make_device_only(&a, &skill_key(BAR));
+  backup_with(&a, &repo).unwrap();
+  let old = device_id(&a);
+
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  take_over_device_with(&b, &repo, &old).unwrap();
+  assert_eq!(device_id(&b), old);
+  assert_eq!(read_state(&b).unwrap().device_name.as_deref(), Some("a"));
+  pull(&b, &repo);
+  assert!(store(&b).read().unwrap().skills.contains_key(BAR));
+  assert_eq!(
+    item_scope(&b, &skill_key(BAR)).unwrap(),
+    Some(ItemScope::Device)
+  );
+  let pending = pending(&b).unwrap();
+  assert_eq!(pending.len(), 2, "{:?}", pending);
+  assert!(pending
+    .iter()
+    .all(|item| item.action == PendingAction::Install));
+  assert_eq!(
+    device_file(&repo, &b).by_item().len(),
+    2,
+    "the device file keeps its installs"
+  );
+
+  // Only on the first connect.
+  let c = computer(tmp.path(), "c", &["claude-code"]);
+  pull(&c, &repo);
+  assert!(take_over_device_with(&c, &repo, &old).is_err());
+  assert!(copy_device_installs_with(&c, &repo, None).is_err());
+}
+
+#[test]
+fn copy_installs_takes_the_agents_of_this_computer_only() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code", "codex"]);
+  add_skill(&a, FOO, "foo", "v1");
+  install(&a, FOO, &["claude-code", "codex"]);
+  backup_with(&a, &repo).unwrap();
+  let source = repo.head_file(&device_path(&device_id(&a))).unwrap();
+
+  let b = computer(tmp.path(), "b", &["claude-code"]);
+  copy_device_installs_with(&b, &repo, None).unwrap();
+  pull(&b, &repo);
+  let pending = pending(&b).unwrap();
+  assert_eq!(
+    pending
+      .iter()
+      .map(|item| (item.action, item.agent_id.as_str()))
+      .collect::<Vec<_>>(),
+    vec![(PendingAction::Install, "claude-code")]
+  );
+  assert_eq!(
+    device_file(&repo, &b).by_item(),
+    BTreeMap::from([(skill_key(FOO), vec!["claude-code".to_string()])])
+  );
+  assert_eq!(
+    repo.head_file(&device_path(&device_id(&a))).unwrap(),
+    source
+  );
+  assert!(copy_device_installs_with(&b, &repo, Some(&device_id(&a))).is_err());
+}
+
+fn three_devices(root: &Path, repo: &FakeRepo) -> (Env, Env, Env) {
+  let a = computer(root, "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  add_skill(&a, BAR, "bar", "v1");
+  add_skill(&a, BAZ, "baz", "v1");
+  write_custom_agents(&a, &[custom_agent("agent-a", "A")]);
+  for key in [
+    skill_key(FOO),
+    skill_key(BAR),
+    skill_key(BAZ),
+    agent_key("agent-a"),
+  ] {
+    make_device_only(&a, &key);
+  }
+  backup_with(&a, repo).unwrap();
+  let b = computer(root, "b", &["claude-code"]);
+  pull(&b, repo);
+  let c = computer(root, "c", &["claude-code"]);
+  pull(&c, repo);
+  (a, b, c)
+}
+
+#[test]
+fn removing_a_device_shares_gives_or_deletes_each_of_its_items() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b, c) = three_devices(tmp.path(), &repo);
+  let c_file = repo.head_file(&device_path(&device_id(&c))).unwrap();
+  let commits = repo.commit_count();
+
+  let mut choices = BTreeMap::from([
+    (skill_key(FOO), DeviceItemChoice::Share),
+    (
+      skill_key(BAR),
+      DeviceItemChoice::Give {
+        device: device_id(&c),
+      },
+    ),
+    (skill_key(BAZ), DeviceItemChoice::Delete),
+  ]);
+  // Every item needs a choice; a receiver must be another device of the repository.
+  assert!(remove_device_with(&b, &repo, &device_id(&a), &choices).is_err());
+  choices.insert(
+    agent_key("agent-a"),
+    DeviceItemChoice::Give {
+      device: device_id(&a),
+    },
+  );
+  assert!(remove_device_with(&b, &repo, &device_id(&a), &choices).is_err());
+  assert!(remove_device_with(&b, &repo, &device_id(&b), &BTreeMap::new()).is_err());
+  choices.insert(
+    agent_key("agent-a"),
+    DeviceItemChoice::Give {
+      device: device_id(&b),
+    },
+  );
+  remove_device_with(&b, &repo, &device_id(&a), &choices).unwrap();
+  assert_eq!(repo.commit_count(), commits + 1);
+
+  let library = library_at_head(&repo);
+  assert_eq!(library.skills[FOO].scope, Scope::Shared);
+  assert_eq!(library.skills[BAR].scope, device_scope(&c));
+  assert!(!library.skills.contains_key(BAZ));
+  assert!(repo
+    .files_at(&repo.head_commit(), &format!("skills/{}/", BAZ))
+    .is_empty());
+  assert_eq!(agents_at_head(&repo)[0].scope, device_scope(&b));
+  assert!(repo.head_file(&device_path(&device_id(&a))).is_none());
+  assert_eq!(
+    repo.head_file(&device_path(&device_id(&c))).unwrap(),
+    c_file
+  );
+
+  // The other devices get their items with the next restore.
+  pull(&b, &repo);
+  assert!(store(&b).read().unwrap().skills.contains_key(FOO));
+  assert!(!store(&b).read().unwrap().skills.contains_key(BAR));
+  assert_eq!(read_user_agent_apps(&b).unwrap()[0].id, "agent-a");
+  pull(&c, &repo);
+  let skills = store(&c).read().unwrap().skills;
+  assert!(skills.contains_key(FOO) && skills.contains_key(BAR) && !skills.contains_key(BAZ));
+  assert_eq!(devices_with(&c, &repo).unwrap().len(), 2);
+}

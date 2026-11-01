@@ -41,12 +41,18 @@ use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
 mod checkpoint;
+mod devices;
 mod migrate;
 mod restore;
 mod scope;
 
 pub use crate::utils::git_remote::RemoteCommit;
 pub use checkpoint::{undo_restore, CheckpointInfo};
+pub use devices::{
+  copy_device_installs, copy_device_installs_with, devices, devices_with, remove_device,
+  remove_device_with, rename_device, take_over_device, take_over_device_with, DeviceInfo,
+  DeviceItem, DeviceItemChoice,
+};
 pub use migrate::{migrate, migrate_with};
 pub use restore::{
   apply_restore, apply_restore_with, history, history_with, plan_restore, plan_restore_with,
