@@ -27,6 +27,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The GitHub backup no longer writes the folder, zip or file path of a local source into the repository. A restore keeps the local path of an item, and a first merge no longer pairs items by an equal folder path. The next backup removes the paths that earlier versions wrote ([#72](https://github.com/wanggang316/youskill/issues/72)).
 - In the dark theme, warning, success and info text (for example the warning before a repository update and the Added tag in the list of changes) is light and easy to read.
 
 ### Removed

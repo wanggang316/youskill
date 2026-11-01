@@ -1189,7 +1189,7 @@ pub(super) fn parse_library(content: &[u8]) -> Result<LibraryFile, String> {
   if library.version > LIBRARY_VERSION {
     return Err("The library was written by a newer YouSkill. Update the app first".to_string());
   }
-  Ok(library)
+  Ok(library.without_local_paths())
 }
 
 /// The repository items a restore writes, checked and assembled before anything local
@@ -1401,7 +1401,7 @@ fn write_prepared(env: &Env, planned: &Planned, prepared: &Prepared) -> Result<(
             id.to_string(),
             SkillRecord {
               name: skill.name.clone(),
-              source: skill.source.clone(),
+              source: merged_source(&SkillSource::None, &skill.source),
               hash: skill.hash.clone(),
               imported_at: skill.imported_at.clone(),
               updated_at: skill.updated_at.clone(),
@@ -1426,7 +1426,7 @@ fn write_prepared(env: &Env, planned: &Planned, prepared: &Prepared) -> Result<(
       match lock.instructions.get_mut(id) {
         Some(record) => {
           record.name = instruction.name.clone();
-          record.source = instruction.source.clone();
+          record.source = merged_instruction_source(&record.source, &instruction.source);
           record.hash = instruction.hash.clone();
           record.imported_at = instruction.imported_at.clone();
           record.updated_at = instruction.updated_at.clone();
@@ -1436,7 +1436,7 @@ fn write_prepared(env: &Env, planned: &Planned, prepared: &Prepared) -> Result<(
             id.to_string(),
             InstructionRecord {
               name: instruction.name.clone(),
-              source: instruction.source.clone(),
+              source: merged_instruction_source(&InstructionSource::None, &instruction.source),
               hash: instruction.hash.clone(),
               imported_at: instruction.imported_at.clone(),
               updated_at: instruction.updated_at.clone(),
