@@ -35,6 +35,18 @@ pub struct RemoteHead {
   pub tree: String,
 }
 
+/// One commit of the sync branch, for the restore history.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteCommit {
+  pub id: String,
+  pub tree: String,
+  /// Commit time (RFC 3339).
+  pub time: String,
+  /// The commit message; library sync puts the device name in it.
+  pub message: String,
+}
+
 /// Why a head update was not applied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UpdateError {
@@ -66,6 +78,8 @@ pub trait RemoteRepo {
   ) -> Result<String, String>;
   /// Move the branch to `commit`. Fails with `Rejected` unless it is a fast-forward.
   fn update_head(&self, commit: &str) -> Result<(), UpdateError>;
+  /// The most recent commits of the sync branch, newest first.
+  fn history(&self, limit: usize) -> Result<Vec<RemoteCommit>, String>;
 }
 
 /// Git blob id of some content: `sha1("blob <len>\0" + content)`.
@@ -106,6 +120,26 @@ struct ShaJson {
 #[derive(Deserialize)]
 struct CommitJson {
   tree: ShaJson,
+}
+
+#[derive(Deserialize)]
+struct HistoryEntryJson {
+  sha: String,
+  commit: HistoryCommitJson,
+}
+
+#[derive(Deserialize)]
+struct HistoryCommitJson {
+  message: String,
+  tree: ShaJson,
+  #[serde(default)]
+  committer: Option<HistoryPersonJson>,
+}
+
+#[derive(Deserialize)]
+struct HistoryPersonJson {
+  #[serde(default)]
+  date: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -448,6 +482,34 @@ impl RemoteRepo for GithubRepo {
         "Moving the branch",
       ))),
     }
+  }
+
+  fn history(&self, limit: usize) -> Result<Vec<RemoteCommit>, String> {
+    let response = self.get(&format!(
+      "commits?sha={}&per_page={}",
+      self.branch,
+      limit.clamp(1, 100)
+    ))?;
+    // 409: the repository has no commits.
+    if response.status() == StatusCode::CONFLICT {
+      return Ok(Vec::new());
+    }
+    let entries: Vec<HistoryEntryJson> = json_ok(response, "Reading the history")?;
+    Ok(
+      entries
+        .into_iter()
+        .map(|entry| RemoteCommit {
+          id: entry.sha,
+          tree: entry.commit.tree.sha,
+          time: entry
+            .commit
+            .committer
+            .and_then(|person| person.date)
+            .unwrap_or_default(),
+          message: entry.commit.message,
+        })
+        .collect(),
+    )
   }
 }
 

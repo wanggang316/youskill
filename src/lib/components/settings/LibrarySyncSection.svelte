@@ -4,45 +4,84 @@
   import { ExternalLink, Loader2, RefreshCw } from "@lucide/svelte";
   import {
     applyLibraryPending,
+    applyLibraryRestore,
     backupLibrary,
-    checkLibraryRemote,
     connectLibrarySync,
     disconnectLibrarySync,
     getGithubAuthStatus,
     getLibrarySyncStatus,
+    listLibraryHistory,
     listLibraryPending,
-    pullLibrary,
+    planLibraryRestore,
+    undoLibraryRestore,
+    type FirstConnectMode,
     type GithubAuthStatus,
     type LibraryChange,
     type PendingAction,
+    type PendingFailure,
     type PendingItem,
-    type RemoteCheck,
+    type RemoteCommit,
+    type RestoreDecisions,
+    type RestoreOptions,
+    type RestoreOutcome,
+    type RestorePlan,
     type SyncStatus,
   } from "$lib/api";
   import IconButton from "$lib/components/ui/IconButton.svelte";
+  import Modal from "$lib/components/ui/Modal.svelte";
   import PrimaryActionButton from "$lib/components/ui/PrimaryActionButton.svelte";
   import { t } from "$lib/i18n";
   import { buildSettingsHref } from "$lib/navigation/app-shell";
   import { agentsById, loadAgents, refreshHub } from "$lib/stores/hub";
   import { refreshInstructions } from "$lib/stores/instructions";
+  import LibraryInstallFailures from "./LibraryInstallFailures.svelte";
+  import LibraryRestorePanel from "./LibraryRestorePanel.svelte";
+  import LibraryRestoreResult, {
+    type RestoreResult,
+    type RestoreSummary,
+  } from "./LibraryRestoreResult.svelte";
   import SettingsPane from "./SettingsPane.svelte";
   import SettingsRow from "./SettingsRow.svelte";
 
-  type Busy = "load" | "connect" | "backup" | "check" | "pull" | "apply" | "disconnect";
-  type Notice = { tone: "success" | "info" | "error"; text: string; details?: string[] };
+  type Busy =
+    | "load"
+    | "connect"
+    | "backup"
+    | "check"
+    | "restore"
+    | "apply"
+    | "history"
+    | "undo"
+    | "disconnect";
+  type Dialog = "restore" | "changes" | "pending" | "history" | "undo" | "disconnect";
+  type Notice = { tone: "success" | "info" | "error"; text: string };
 
   const DEFAULT_REPO = "youskill-library";
   const ACTION_ORDER: PendingAction[] = ["install", "update", "uninstall"];
+  const CHANGE_TAG: Record<LibraryChange["change"], string> = {
+    added: "tag-success",
+    modified: "tag-info",
+    removed: "tag-error",
+  };
 
   let status = $state<SyncStatus | null>(null);
   let github = $state<GithubAuthStatus | null>(null);
-  let remote = $state<RemoteCheck | null>(null);
+  /** The last restore preview; kept after the dialog closes to summarize the repository. */
+  let plan = $state<RestorePlan | null>(null);
+  let history = $state<RemoteCommit[]>([]);
   let pending = $state<PendingItem[]>([]);
   let selected = $state<string[]>([]);
   let repoInput = $state(DEFAULT_REPO);
   let busy = $state<Busy | null>(null);
   let notice = $state<Notice | null>(null);
-  let confirmDisconnect = $state(false);
+  /** The open dialog. A notice shows in it while it is open, else under the settings. */
+  let dialog = $state<Dialog | null>(null);
+  /** The outcome shown as the last step of the restore dialog. */
+  let restoreResult = $state<RestoreResult | null>(null);
+  /** The restore the result belongs to, to plan it again. */
+  let lastRestore = $state<{ mode: RestorePlan["mode"]; target: string | null } | null>(null);
+  /** Pending installs that the last apply skipped. */
+  let pendingFailures = $state<PendingFailure[]>([]);
 
   const githubReady = $derived(Boolean(github?.gh_installed && github?.selected_login));
   const pendingGroups = $derived(
@@ -67,9 +106,23 @@
 
   const agentName = (id: string) => $agentsById.get(id)?.display_name ?? id;
 
+  const shortId = (id: string) => id.slice(0, 7);
+
   function errorText(error: unknown): string {
     return error instanceof Error ? error.message : String(error);
   }
+
+  function openDialog(next: Dialog) {
+    notice = null;
+    pendingFailures = [];
+    dialog = next;
+  }
+
+  const closeDialog = () => {
+    dialog = null;
+    restoreResult = null;
+    pendingFailures = [];
+  };
 
   async function load() {
     busy = "load";
@@ -95,10 +148,6 @@
     await Promise.all([refreshHub(), refreshInstructions()]);
   }
 
-  function changeCount(changes: LibraryChange[]): number {
-    return changes.length;
-  }
-
   async function run(kind: Busy, action: () => Promise<void>) {
     if (busy) return;
     busy = kind;
@@ -115,10 +164,12 @@
   const connect = () =>
     run("connect", async () => {
       status = await connectLibrarySync(repoInput);
-      remote = await checkLibraryRemote();
-      if (remote.remoteHasLibrary && status.libraryEmpty) {
+      await preview("pull");
+      if (plan?.state === "choose_mode") {
+        notice = { tone: "info", text: $t("settings.sync.connectedChooseHint") };
+      } else if (plan?.state !== "remote_empty" && status.libraryEmpty) {
         notice = { tone: "info", text: $t("settings.sync.connectedRestoreHint") };
-      } else {
+      } else if (dialog === null) {
         notice = { tone: "success", text: $t("settings.sync.connected") };
       }
     });
@@ -126,8 +177,9 @@
   const disconnect = () =>
     run("disconnect", async () => {
       await disconnectLibrarySync();
-      confirmDisconnect = false;
-      remote = null;
+      dialog = null;
+      plan = null;
+      history = [];
       pending = [];
       status = await getLibrarySyncStatus();
     });
@@ -135,7 +187,13 @@
   const backup = () =>
     run("backup", async () => {
       const outcome = await backupLibrary();
-      const count = changeCount(outcome.changes);
+      const count = outcome.changes.length;
+      if (dialog === "changes") dialog = null;
+      status = await getLibrarySyncStatus();
+      if (outcome.result === "pushed") plan = null;
+      else if (outcome.result !== "up_to_date") {
+        await preview(outcome.result === "remote_not_empty" ? "merge" : "pull");
+      }
       notice =
         outcome.result === "pushed"
           ? { tone: "success", text: $t("settings.sync.backupPushed", { count }) }
@@ -144,44 +202,119 @@
             : outcome.result === "remote_ahead"
               ? { tone: "info", text: $t("settings.sync.backupRemoteAhead") }
               : outcome.result === "diverged"
-                ? { tone: "error", text: $t("settings.sync.diverged") }
-                : { tone: "error", text: $t("settings.sync.backupRemoteNotEmpty") };
-      status = await getLibrarySyncStatus();
-      if (outcome.result === "remote_ahead") remote = await checkLibraryRemote();
-      else if (outcome.result === "pushed") remote = null;
+                ? { tone: "info", text: $t("settings.sync.diverged") }
+                : { tone: "info", text: $t("settings.sync.backupRemoteNotEmpty") };
     });
 
-  const check = () =>
-    run("check", async () => {
-      remote = await checkLibraryRemote();
-      if (!remote.remoteHasLibrary) {
-        notice = { tone: "info", text: $t("settings.sync.remoteEmpty") };
-      }
+  /** Plan a restore and open it, or report that there is nothing to restore. */
+  async function preview(mode: RestorePlan["mode"], target: string | null = null) {
+    plan = await planLibraryRestore(mode, target);
+    restoreResult = null;
+    if (plan.state === "ready" || plan.state === "choose_mode") {
+      dialog = "restore";
+      return;
+    }
+    if (dialog === "restore") dialog = null;
+    notice = {
+      tone: "info",
+      text:
+        plan.state === "remote_empty"
+          ? $t("settings.sync.remoteEmpty")
+          : $t("settings.sync.pullUpToDate"),
+    };
+  }
+
+  const restore = () => run("check", () => preview("pull"));
+
+  const chooseMode = (mode: FirstConnectMode) =>
+    run("check", () => preview(mode, plan?.target ?? null));
+
+  const applyRestore = (
+    decisions: RestoreDecisions,
+    options: RestoreOptions,
+    summary: RestoreSummary
+  ) =>
+    run("restore", async () => {
+      if (plan) await applyPlan(plan, decisions, options, summary);
     });
 
-  const pull = () =>
-    run("pull", async () => {
-      const outcome = await pullLibrary();
-      const count = changeCount(outcome.changes);
-      notice =
-        outcome.result === "pulled"
-          ? {
-              tone: outcome.errors.length ? "error" : "success",
-              text: $t("settings.sync.pulled", { count }),
-              details: outcome.errors,
-            }
-          : outcome.result === "up_to_date"
-            ? { tone: "info", text: $t("settings.sync.pullUpToDate") }
-            : outcome.result === "remote_empty"
-              ? { tone: "info", text: $t("settings.sync.remoteEmpty") }
-              : outcome.result === "diverged"
-                ? { tone: "error", text: $t("settings.sync.diverged") }
-                : { tone: "error", text: $t("settings.sync.pullLocalNotEmpty") };
-      if (outcome.result === "pulled") {
-        remote = null;
-        await reloadLibrary(outcome.agentsChanged);
-        await loadPending();
+  async function applyPlan(
+    current: RestorePlan,
+    decisions: RestoreDecisions,
+    options: RestoreOptions,
+    summary: RestoreSummary
+  ) {
+    lastRestore = { mode: current.mode, target: current.target };
+    const checkpointBefore = status?.checkpoint?.createdAt;
+    let outcome: RestoreOutcome;
+    try {
+      outcome = await applyLibraryRestore(current, decisions, options);
+    } catch (error) {
+      // A restore that stopped part-way may have written items and left a checkpoint.
+      await refreshAfterFailure();
+      restoreResult = {
+        state: "failed",
+        message: errorText(error),
+        canUndo: Boolean(status?.checkpoint) && status?.checkpoint?.createdAt !== checkpointBefore,
+      };
+      return;
+    }
+    if (outcome.result === "stale" && !outcome.localApplied) {
+      await preview(current.mode, current.target);
+      notice = { tone: "error", text: $t("settings.sync.restoreStale") };
+      return;
+    }
+    restoreResult = { state: "done", outcome, summary };
+    plan = null;
+    if (outcome.localApplied) {
+      await reloadLibrary(outcome.agentsChanged);
+      await loadPending();
+    }
+    status = await getLibrarySyncStatus();
+  }
+
+  async function refreshAfterFailure() {
+    await reloadLibrary(true);
+    status = await getLibrarySyncStatus();
+  }
+
+  const restoreAgain = () =>
+    run("check", () => preview(lastRestore?.mode ?? "pull", lastRestore?.target ?? null));
+
+  function reviewSkipped() {
+    pendingFailures =
+      restoreResult?.state === "done" ? (restoreResult.outcome.installs?.failures ?? []) : [];
+    restoreResult = null;
+    notice = null;
+    dialog = "pending";
+  }
+
+  const showHistory = () =>
+    run("history", async () => {
+      history = await listLibraryHistory();
+      dialog = "history";
+    });
+
+  const previewCommit = (commit: RemoteCommit) => run("check", () => preview("pull", commit.id));
+
+  const undo = () =>
+    run("undo", async () => {
+      try {
+        await undoLibraryRestore();
+      } catch (error) {
+        await refreshAfterFailure();
+        if (restoreResult) {
+          restoreResult = { state: "failed", message: errorText(error), canUndo: true };
+          return;
+        }
+        throw error;
       }
+      dialog = null;
+      restoreResult = null;
+      plan = null;
+      notice = { tone: "success", text: $t("settings.sync.undone") };
+      await reloadLibrary(true);
+      await loadPending();
       status = await getLibrarySyncStatus();
     });
 
@@ -190,16 +323,17 @@
       const items = pending.filter((item) => selected.includes(itemKey(item)));
       if (items.length === 0) return;
       const outcome = await applyLibraryPending(items);
-      notice = outcome.failures.length
-        ? {
-            tone: "error",
-            text: $t("settings.sync.pendingPartly", { count: outcome.applied }),
-            details: outcome.failures,
-          }
-        : { tone: "success", text: $t("settings.sync.pendingApplied", { count: outcome.applied }) };
       await reloadLibrary();
       await loadPending();
       status = await getLibrarySyncStatus();
+      pendingFailures = outcome.failures;
+      if (outcome.failures.length === 0) {
+        dialog = null;
+        notice = {
+          tone: "success",
+          text: $t("settings.sync.pendingApplied", { count: outcome.applied }),
+        };
+      }
     });
 
   function toggle(item: PendingItem) {
@@ -209,10 +343,8 @@
       : [...selected, key];
   }
 
-  function changeLabel(change: LibraryChange): string {
-    const name =
-      change.kind === "agents" ? $t("settings.sync.customAgents") : change.name || change.id;
-    return `${$t(`settings.sync.change.${change.change}`)} · ${name}`;
+  function changeName(change: LibraryChange): string {
+    return change.kind === "agents" ? $t("settings.sync.customAgents") : change.name || change.id;
   }
 
   function localSummary(current: SyncStatus): string {
@@ -226,17 +358,56 @@
   }
 
   function remoteSummary(current: SyncStatus): string {
-    if (remote) {
-      if (!remote.remoteHasLibrary) return $t("settings.sync.remoteEmpty");
-      return remote.remoteAhead
-        ? $t("settings.sync.remoteAhead", { count: remote.changes.length })
+    if (plan) {
+      if (plan.state === "remote_empty") return $t("settings.sync.remoteEmpty");
+      if (plan.state === "choose_mode") return $t("settings.sync.remoteHasLibrary");
+      const incoming = plan.items.filter((item) => item.resolution !== "keep_local").length;
+      return incoming > 0
+        ? $t("settings.sync.remoteAhead", { count: incoming })
         : $t("settings.sync.remoteUpToDate");
     }
     return current.lastPullAt
       ? $t("settings.sync.lastPull", { time: formatTime(current.lastPullAt) })
       : $t("settings.sync.notChecked");
   }
+
+  function restoreTitle(current: RestorePlan | null): string {
+    if (current?.state === "choose_mode") return $t("settings.sync.restore.chooseTitle");
+    return current?.target
+      ? $t("settings.sync.restore.titleAt", { target: shortId(current.target) })
+      : $t("settings.sync.restore.title");
+  }
 </script>
+
+{#snippet noticeView(boxed: boolean)}
+  {#if notice}
+    <div
+      class={`text-[13px] [overflow-wrap:anywhere] ${boxed ? "rounded-xl px-4 py-3" : "px-1"} ${
+        notice.tone === "error"
+          ? `text-error ${boxed ? "bg-error/10" : ""}`
+          : notice.tone === "success"
+            ? "text-success"
+            : `text-base-content-muted ${boxed ? "bg-base-200" : ""}`
+      }`}
+    >
+      <p>{notice.text}</p>
+    </div>
+  {/if}
+{/snippet}
+
+{#snippet restoreMessage()}
+  {#if notice?.tone !== "error"}{@render noticeView(true)}{/if}
+{/snippet}
+
+{#snippet restoreAlert()}
+  {#if notice?.tone === "error"}{@render noticeView(true)}{/if}
+{/snippet}
+
+{#snippet cancelButton()}
+  <button class="settings-button" type="button" onclick={closeDialog} disabled={busy !== null}>
+    {$t("common.cancel")}
+  </button>
+{/snippet}
 
 <SettingsPane title={$t("settings.section.backup")} description={$t("settings.sync.description")}>
   {#snippet actions()}
@@ -306,81 +477,87 @@
         >
           <ExternalLink size={15} />
         </IconButton>
-        {#if confirmDisconnect}
-          <button
-            class="settings-button text-error"
-            type="button"
-            onclick={disconnect}
-            disabled={busy !== null}
-          >
-            {$t("settings.sync.confirmDisconnect")}
-          </button>
-        {:else}
+        <button
+          class="settings-button"
+          type="button"
+          onclick={() => openDialog("disconnect")}
+          disabled={busy !== null}
+        >
+          {$t("settings.sync.disconnect")}
+        </button>
+      </SettingsRow>
+      <SettingsRow label={$t("settings.sync.thisComputer")} description={localSummary(status)}>
+        {#if status.changes.length > 0}
           <button
             class="settings-button"
             type="button"
-            onclick={() => (confirmDisconnect = true)}
+            onclick={() => openDialog("changes")}
             disabled={busy !== null}
           >
-            {$t("settings.sync.disconnect")}
+            {$t("settings.sync.viewChanges")}
           </button>
         {/if}
-      </SettingsRow>
-      <SettingsRow label={$t("settings.sync.thisComputer")} description={localSummary(status)}>
         <PrimaryActionButton
           className="h-8 rounded-lg px-3 py-0 text-[13px]"
           onclick={backup}
           disabled={busy !== null && busy !== "backup"}
-          loading={busy === "backup"}
+          loading={busy === "backup" && dialog === null}
           loadingText={$t("settings.sync.backingUp")}
         >
           {$t("settings.sync.backup")}
         </PrimaryActionButton>
       </SettingsRow>
       <SettingsRow label={$t("settings.sync.remote")} description={remoteSummary(status)}>
-        <button class="settings-button" type="button" onclick={check} disabled={busy !== null}>
-          {#if busy === "check"}<Loader2 size={13} class="animate-spin" />{/if}
-          {$t("settings.sync.check")}
-        </button>
-        <button class="settings-button" type="button" onclick={pull} disabled={busy !== null}>
-          {#if busy === "pull"}<Loader2 size={13} class="animate-spin" />{/if}
+        <button class="settings-button" type="button" onclick={restore} disabled={busy !== null}>
+          {#if busy === "check" && dialog === null}<Loader2 size={13} class="animate-spin" />{/if}
           {$t("settings.sync.pull")}
+        </button>
+      </SettingsRow>
+      {#if pending.length > 0}
+        <SettingsRow
+          label={$t("settings.sync.pendingTitle")}
+          description={$t("settings.sync.pendingSummary", { count: pending.length })}
+        >
+          <button
+            class="settings-button"
+            type="button"
+            onclick={() => openDialog("pending")}
+            disabled={busy !== null}
+          >
+            {$t("settings.sync.review")}
+          </button>
+        </SettingsRow>
+      {/if}
+      <SettingsRow
+        label={$t("settings.sync.history")}
+        description={status.checkpoint
+          ? $t("settings.sync.checkpointAt", { time: formatTime(status.checkpoint.createdAt) })
+          : $t("settings.sync.historyHint")}
+      >
+        {#if status.checkpoint}
+          <button
+            class="settings-button"
+            type="button"
+            onclick={() => openDialog("undo")}
+            disabled={busy !== null}
+          >
+            {$t("settings.sync.undo")}
+          </button>
+        {/if}
+        <button
+          class="settings-button"
+          type="button"
+          onclick={showHistory}
+          disabled={busy !== null}
+        >
+          {#if busy === "history"}<Loader2 size={13} class="animate-spin" />{/if}
+          {$t("settings.sync.showHistory")}
         </button>
       </SettingsRow>
     </div>
 
-    {#if confirmDisconnect}
-      <p class="text-base-content-muted px-1 text-xs">{$t("settings.sync.disconnectHint")}</p>
-    {/if}
-
     {#if status.libraryEmpty && !status.hasSynced}
       <p class="text-base-content-muted px-1 text-xs">{$t("settings.sync.emptyLibraryHint")}</p>
-    {/if}
-
-    {#if status.changes.length > 0}
-      <div class="space-y-2">
-        <h3 class="text-base-content-subtle px-1 text-[11px] font-medium tracking-wide uppercase">
-          {$t("settings.sync.localChangesTitle")}
-        </h3>
-        <ul class="settings-card px-4 py-2 text-[13px]">
-          {#each status.changes as change (`${change.kind}:${change.id}`)}
-            <li class="text-base-content py-1">{changeLabel(change)}</li>
-          {/each}
-        </ul>
-      </div>
-    {/if}
-
-    {#if remote?.remoteAhead && remote.changes.length > 0}
-      <div class="space-y-2">
-        <h3 class="text-base-content-subtle px-1 text-[11px] font-medium tracking-wide uppercase">
-          {$t("settings.sync.remoteChangesTitle")}
-        </h3>
-        <ul class="settings-card px-4 py-2 text-[13px]">
-          {#each remote.changes as change (`${change.kind}:${change.id}`)}
-            <li class="text-base-content py-1">{changeLabel(change)}</li>
-          {/each}
-        </ul>
-      </div>
     {/if}
 
     {#if status.skipped.length > 0}
@@ -388,71 +565,225 @@
         {$t("settings.sync.skipped", { names: status.skipped.join(", ") })}
       </p>
     {/if}
-
-    {#if pendingGroups.length > 0}
-      <div class="space-y-2">
-        <div class="flex items-baseline justify-between gap-4 px-1">
-          <h3 class="text-base-content-subtle text-[11px] font-medium tracking-wide uppercase">
-            {$t("settings.sync.pendingTitle")}
-          </h3>
-          <span class="text-base-content-muted text-xs">{$t("settings.sync.pendingHint")}</span>
-        </div>
-        <div class="settings-card">
-          {#each pendingGroups as group (group.action)}
-            <div class="px-4 py-3">
-              <div class="text-base-content-muted mb-1.5 text-xs">
-                {$t(`settings.sync.pending.${group.action}`)}
-              </div>
-              {#each group.items as item (itemKey(item))}
-                <label class="text-base-content flex items-center gap-2.5 py-1 text-[13px]">
-                  <input
-                    type="checkbox"
-                    checked={selected.includes(itemKey(item))}
-                    onchange={() => toggle(item)}
-                    disabled={busy !== null}
-                  />
-                  <span class="min-w-0 truncate">
-                    {item.name}
-                    <span class="text-base-content-muted">→ {agentName(item.agentId)}</span>
-                  </span>
-                </label>
-              {/each}
-            </div>
-          {/each}
-          <div class="flex justify-end px-4 py-3">
-            <PrimaryActionButton
-              className="h-8 rounded-lg px-3 py-0 text-[13px]"
-              onclick={applyPending}
-              disabled={selected.length === 0 || (busy !== null && busy !== "apply")}
-              loading={busy === "apply"}
-              loadingText={$t("settings.sync.applying")}
-            >
-              {$t("settings.sync.applySelected", { count: selected.length })}
-            </PrimaryActionButton>
-          </div>
-        </div>
-      </div>
-    {/if}
   {/if}
 
-  {#if notice}
-    <div
-      class={`px-1 text-[13px] break-all ${
-        notice.tone === "error"
-          ? "text-error"
-          : notice.tone === "success"
-            ? "text-success"
-            : "text-base-content-muted"
-      }`}
-    >
-      <p>{notice.text}</p>
-      {#if notice.details?.length}
-        <ul class="mt-1 list-disc pl-5 text-xs">
-          {#each notice.details as detail, index (index)}
-            <li>{detail}</li>
-          {/each}
-        </ul>
-      {/if}
-    </div>
+  {#if dialog === null}
+    {@render noticeView(false)}
   {/if}
 </SettingsPane>
+
+<Modal
+  open={dialog === "restore" && (plan !== null || restoreResult !== null)}
+  title={restoreResult ? $t("settings.sync.restore.title") : restoreTitle(plan)}
+  onClose={closeDialog}
+  showCloseButton={busy === null}
+  containerClass="max-w-2xl"
+>
+  {#if restoreResult}
+    <LibraryRestoreResult
+      result={restoreResult}
+      busy={busy !== null}
+      onDone={closeDialog}
+      onUndo={undo}
+      onRetry={restoreAgain}
+      onReviewPending={reviewSkipped}
+    />
+  {:else if plan}
+    {#key `${plan.mode}:${plan.target ?? ""}:${plan.fingerprint}:${plan.remoteHead ?? ""}`}
+      <LibraryRestorePanel
+        {plan}
+        busy={busy !== null}
+        message={restoreMessage}
+        alert={restoreAlert}
+        onChooseMode={chooseMode}
+        onApply={applyRestore}
+        onCancel={closeDialog}
+      />
+    {/key}
+  {/if}
+</Modal>
+
+<Modal
+  open={dialog === "changes" && status !== null}
+  title={$t("settings.sync.localChangesTitle")}
+  onClose={closeDialog}
+  containerClass="max-w-lg"
+>
+  <div class="space-y-3 px-6 pt-4 pb-5">
+    <p class="text-base-content-muted text-xs leading-relaxed">
+      {$t("settings.sync.localChangesHint")}
+    </p>
+    {@render noticeView(true)}
+    <ul class="border-base-300 divide-base-300 divide-y rounded-xl border">
+      {#each status?.changes ?? [] as change (`${change.kind}:${change.id}`)}
+        <li class="flex items-center justify-between gap-4 px-3 py-2 text-[13px]">
+          <span class="text-base-content min-w-0 truncate">{changeName(change)}</span>
+          <span class={`tag shrink-0 ${CHANGE_TAG[change.change]}`}>
+            {$t(`settings.sync.change.${change.change}`)}
+          </span>
+        </li>
+      {/each}
+    </ul>
+  </div>
+  {#snippet footer()}
+    <button class="settings-button" type="button" onclick={closeDialog} disabled={busy !== null}>
+      {$t("common.close")}
+    </button>
+    <PrimaryActionButton
+      className="h-8 rounded-lg px-3 py-0 text-[13px]"
+      onclick={backup}
+      disabled={busy !== null && busy !== "backup"}
+      loading={busy === "backup"}
+      loadingText={$t("settings.sync.backingUp")}
+    >
+      {$t("settings.sync.backup")}
+    </PrimaryActionButton>
+  {/snippet}
+</Modal>
+
+<Modal
+  open={dialog === "pending"}
+  title={$t("settings.sync.pendingTitle")}
+  onClose={closeDialog}
+  containerClass="max-w-lg"
+>
+  <div class="space-y-4 px-6 pt-4 pb-5">
+    <p class="text-base-content-muted text-xs leading-relaxed">
+      {$t("settings.sync.pendingHint")}
+    </p>
+    {#if pendingFailures.length > 0}
+      <LibraryInstallFailures failures={pendingFailures} />
+    {/if}
+    {@render noticeView(true)}
+    {#each pendingGroups as group (group.action)}
+      <section>
+        <h4 class="text-base-content mb-2 text-[13px] font-medium">
+          {$t(`settings.sync.pending.${group.action}`)}
+        </h4>
+        <ul class="border-base-300 divide-base-300 divide-y rounded-xl border">
+          {#each group.items as item (itemKey(item))}
+            <li class="px-3 py-2">
+              <label class="text-base-content flex items-center gap-2.5 text-[13px]">
+                <input
+                  type="checkbox"
+                  checked={selected.includes(itemKey(item))}
+                  onchange={() => toggle(item)}
+                  disabled={busy !== null}
+                />
+                <span class="min-w-0 truncate">
+                  {item.name}
+                  <span class="text-base-content-muted text-xs">· {agentName(item.agentId)}</span>
+                </span>
+              </label>
+            </li>
+          {/each}
+        </ul>
+      </section>
+    {/each}
+  </div>
+  {#snippet footer()}
+    {@render cancelButton()}
+    <PrimaryActionButton
+      className="h-8 rounded-lg px-3 py-0 text-[13px]"
+      onclick={applyPending}
+      disabled={selected.length === 0 || (busy !== null && busy !== "apply")}
+      loading={busy === "apply"}
+      loadingText={$t("settings.sync.applying")}
+    >
+      {$t("settings.sync.applySelected", { count: selected.length })}
+    </PrimaryActionButton>
+  {/snippet}
+</Modal>
+
+<Modal
+  open={dialog === "history"}
+  title={$t("settings.sync.historyTitle")}
+  onClose={closeDialog}
+  containerClass="max-w-lg"
+>
+  <div class="space-y-3 px-6 pt-4 pb-5">
+    <p class="text-base-content-muted text-xs leading-relaxed">
+      {$t("settings.sync.historyDialogHint")}
+    </p>
+    {@render noticeView(true)}
+    {#if history.length === 0}
+      <p class="text-base-content-muted py-4 text-center text-[13px]">
+        {$t("settings.sync.historyEmpty")}
+      </p>
+    {:else}
+      <ul class="border-base-300 divide-base-300 divide-y rounded-xl border">
+        {#each history as commit (commit.id)}
+          <li class="flex items-center justify-between gap-4 px-3 py-2 text-[13px]">
+            <span class="min-w-0">
+              <span class="text-base-content block truncate">{commit.message}</span>
+              <span class="text-base-content-muted block text-xs">
+                {formatTime(commit.time)} · {shortId(commit.id)}
+              </span>
+            </span>
+            <button
+              class="settings-button shrink-0"
+              type="button"
+              onclick={() => previewCommit(commit)}
+              disabled={busy !== null}
+            >
+              {$t("settings.sync.restoreThis")}
+            </button>
+          </li>
+        {/each}
+      </ul>
+    {/if}
+  </div>
+</Modal>
+
+<Modal
+  open={dialog === "undo"}
+  title={$t("settings.sync.undoTitle")}
+  onClose={closeDialog}
+  containerClass="max-w-md"
+>
+  <div class="space-y-3 px-6 pt-4 pb-5 text-[13px]">
+    <p class="text-base-content leading-relaxed">{$t("settings.sync.undoHint")}</p>
+    {#if status?.checkpoint}
+      <p class="text-base-content-muted text-xs">
+        {$t("settings.sync.checkpointAt", { time: formatTime(status.checkpoint.createdAt) })}
+      </p>
+    {/if}
+    {@render noticeView(true)}
+  </div>
+  {#snippet footer()}
+    {@render cancelButton()}
+    <PrimaryActionButton
+      className="h-8 rounded-lg px-3 py-0 text-[13px]"
+      variant="danger"
+      onclick={undo}
+      disabled={busy !== null && busy !== "undo"}
+      loading={busy === "undo"}
+    >
+      {$t("settings.sync.confirmUndo")}
+    </PrimaryActionButton>
+  {/snippet}
+</Modal>
+
+<Modal
+  open={dialog === "disconnect"}
+  title={$t("settings.sync.disconnectTitle")}
+  onClose={closeDialog}
+  containerClass="max-w-md"
+>
+  <div class="space-y-3 px-6 pt-4 pb-5 text-[13px]">
+    <p class="text-base-content leading-relaxed">{$t("settings.sync.disconnectHint")}</p>
+    {@render noticeView(true)}
+  </div>
+  {#snippet footer()}
+    {@render cancelButton()}
+    <PrimaryActionButton
+      className="h-8 rounded-lg px-3 py-0 text-[13px]"
+      variant="danger"
+      onclick={disconnect}
+      disabled={busy !== null && busy !== "disconnect"}
+      loading={busy === "disconnect"}
+    >
+      {$t("settings.sync.confirmDisconnect")}
+    </PrimaryActionButton>
+  {/snippet}
+</Modal>
