@@ -1120,7 +1120,7 @@ pub(super) fn parse_library(content: &[u8]) -> Result<LibraryFile, String> {
   if library.version > LIBRARY_VERSION {
     return Err("The library was written by a newer YouSkill. Update the app first".to_string());
   }
-  Ok(library)
+  Ok(library.without_local_paths())
 }
 
 /// The repository items a restore writes, checked and assembled before anything local

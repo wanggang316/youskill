@@ -119,6 +119,21 @@ impl Default for LibraryFile {
   }
 }
 
+impl LibraryFile {
+  /// Remove the paths of local sources. Every library read from the repository or the sync
+  /// state goes through this, so a path that an earlier version wrote is never carried,
+  /// compared or written again.
+  fn without_local_paths(mut self) -> Self {
+    for skill in self.skills.values_mut() {
+      skill.source = shared_source(&skill.source);
+    }
+    for instruction in self.instructions.values_mut() {
+      instruction.source = shared_instruction_source(&instruction.source);
+    }
+    self
+  }
+}
+
 /// A skill record. A version 1 record also has `agents`, which is ignored: read as
 /// version 2, every version 1 item is shared and has no installs.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
@@ -361,6 +376,18 @@ pub fn read_state(env: &Env) -> Result<SyncState, String> {
   state
     .deferred
     .retain(|key, version| split_key(key).is_some() && version.entry != Entry::Legacy);
+  state.base_library = state.base_library.map(LibraryFile::without_local_paths);
+  for version in state.deferred.values_mut() {
+    version.strip_local_paths();
+  }
+  for incoming in state.incoming.values_mut() {
+    for version in [&mut incoming.base, &mut incoming.remote]
+      .into_iter()
+      .flatten()
+    {
+      version.strip_local_paths();
+    }
+  }
   Ok(state)
 }
 
@@ -641,6 +668,17 @@ impl ItemVersion {
         _ => None,
       },
       Entry::Agent(_) | Entry::Legacy => None,
+    }
+  }
+
+  /// Remove the path of a local source (see `LibraryFile::without_local_paths`).
+  fn strip_local_paths(&mut self) {
+    match &mut self.entry {
+      Entry::Skill(skill) => skill.source = shared_source(&skill.source),
+      Entry::Instruction(instruction) => {
+        instruction.source = shared_instruction_source(&instruction.source)
+      },
+      Entry::Agent(_) | Entry::Legacy => {},
     }
   }
 
@@ -1386,25 +1424,17 @@ fn compose(
 ) -> Result<Composed, String> {
   let mut library = snapshot.library.clone();
   library.version = LIBRARY_VERSION;
-  // The items of other devices are copied unchanged, except a local path that a version
-  // before paths stayed local wrote.
   for (id, skill) in &foreign.skills {
     library
       .skills
       .entry(id.clone())
-      .or_insert_with(|| LibrarySkill {
-        source: shared_source(&skill.source),
-        ..skill.clone()
-      });
+      .or_insert_with(|| skill.clone());
   }
   for (id, instruction) in &foreign.instructions {
     library
       .instructions
       .entry(id.clone())
-      .or_insert_with(|| LibraryInstruction {
-        source: shared_instruction_source(&instruction.source),
-        ..instruction.clone()
-      });
+      .or_insert_with(|| instruction.clone());
   }
   let mut agents = snapshot.agents.clone();
   for agent in &foreign.agents {
@@ -1797,8 +1827,13 @@ pub fn backup_with(env: &Env, remote: &dyn RemoteRepo) -> Result<BackupOutcome, 
       if base.library.version < LIBRARY_VERSION {
         return Ok(outcome(BackupResult::MigrationRequired, None, changes));
       }
+      // Without changes a backup still writes a `library.json` that holds local paths of
+      // an earlier version: the library read from it has none, so the files differ.
       if changes.is_empty() {
-        return Ok(outcome(BackupResult::UpToDate, Some(base_commit), changes));
+        let composed = compose(&snapshot, &base.foreign(&device), &device, None)?;
+        if composed.tree.get(LIBRARY_FILE) == base.files.get(LIBRARY_FILE) {
+          return Ok(outcome(BackupResult::UpToDate, Some(base_commit), changes));
+        }
       }
       base.clone()
     },

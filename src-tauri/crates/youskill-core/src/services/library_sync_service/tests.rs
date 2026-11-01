@@ -2572,3 +2572,150 @@ fn source_paths_in_an_existing_repository_go_on_the_next_backup() {
   assert!(!text.contains("/old/"), "{}", text);
   assert_eq!(library_at_head(&repo).skills[OTHER_SKILL].name, "theirs");
 }
+
+/// Replace the head with a commit whose `library.json` holds an absolute path in each local
+/// source, as versions before #72 wrote it.
+fn put_old_paths(repo: &FakeRepo) {
+  let mut library: serde_json::Value =
+    serde_json::from_slice(&repo.head_file(LIBRARY_FILE).unwrap()).unwrap();
+  for kind in ["skills", "instructions"] {
+    for (id, record) in library[kind].as_object_mut().unwrap().iter_mut() {
+      let source = record["source"].as_object_mut().unwrap();
+      if source.contains_key("path") {
+        source.insert("path".to_string(), format!("/old/{}", id).into());
+      }
+    }
+  }
+  commit_files(
+    repo,
+    repo.files_at(&repo.head_commit(), ""),
+    &[(LIBRARY_FILE, pretty_json(&library).unwrap())],
+    "Backup from an old app",
+  );
+}
+
+fn assert_no_old_paths(repo: &FakeRepo) {
+  let text = String::from_utf8(repo.head_file(LIBRARY_FILE).unwrap()).unwrap();
+  assert!(!text.contains("/old/"), "{}", text);
+}
+
+#[test]
+fn an_old_path_of_a_deferred_item_is_not_written_back() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    set_source(a, FOO, folder("/a/foo"));
+  });
+  edit_skill(&a, FOO, "foo", "v2");
+  backup_with(&a, &repo).unwrap();
+  put_old_paths(&repo);
+
+  // B leaves the change out, then backs up another item.
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  apply(
+    &b,
+    &repo,
+    &planned,
+    RestoreDecisions {
+      include: BTreeMap::from([(skill_key(FOO), false)]),
+      ..Default::default()
+    },
+  );
+  assert!(skill_body(&b, FOO, "foo").contains("v1"));
+  add_skill(&b, BAR, "bar", "v1");
+  assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
+  assert_no_old_paths(&repo);
+  // The deferred item is still offered, excluded by default, and B has nothing more to back up.
+  let planned = plan(&b, &repo, RestoreMode::Pull);
+  assert!(item(&planned, &skill_key(FOO)).deferred);
+  assert!(status(&b).unwrap().changes.is_empty());
+}
+
+#[test]
+fn an_old_path_of_an_incoming_item_is_not_written_back() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let (a, b) = synced_pair(tmp.path(), &repo, |a| {
+    add_skill(a, FOO, "foo", "v1");
+    set_source(a, FOO, folder("/a/foo"));
+  });
+  edit_skill(&a, FOO, "foo", "v2");
+  backup_with(&a, &repo).unwrap();
+  put_old_paths(&repo);
+
+  // B backs up another item on the moved head; the change of A becomes incoming.
+  add_skill(&b, BAR, "bar", "v1");
+  let backup = backup_with(&b, &repo).unwrap();
+  assert_eq!((backup.result, backup.incoming), (BackupResult::Pushed, 1));
+  assert_no_old_paths(&repo);
+  add_skill(&b, BAZ, "baz", "v1");
+  assert_eq!(backup_with(&b, &repo).unwrap().result, BackupResult::Pushed);
+  assert_no_old_paths(&repo);
+  assert!(status(&b).unwrap().changes.is_empty());
+
+  pull(&b, &repo);
+  assert!(skill_body(&b, FOO, "foo").contains("v2"));
+  assert_eq!(skill_source(&b, FOO), folder(""));
+}
+
+#[test]
+fn the_migration_removes_old_paths() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  set_source(&a, FOO, folder("/a/foo"));
+  add_instruction(&a, NOTE, "# rules\n");
+  set_instruction_source(&a, NOTE, file_source("/a/rules.md"));
+  backup_with(&a, &repo).unwrap();
+  downgrade_head(&repo, &[]);
+  put_old_paths(&repo);
+  old_app_state(&a, &repo);
+
+  migrate_with(&a, &repo).unwrap();
+  assert_eq!(library_at_head(&repo).version, 2);
+  assert_no_old_paths(&repo);
+  assert!(status(&a).unwrap().changes.is_empty());
+  assert_eq!(
+    backup_with(&a, &repo).unwrap().result,
+    BackupResult::UpToDate
+  );
+  assert_eq!(skill_source(&a, FOO), folder("/a/foo"));
+}
+
+#[test]
+fn an_unchanged_backup_removes_old_paths_once() {
+  let tmp = tempfile::tempdir().unwrap();
+  let repo = FakeRepo::initialized();
+  let a = computer(tmp.path(), "a", &["claude-code"]);
+  add_skill(&a, FOO, "foo", "v1");
+  set_source(&a, FOO, folder("/a/foo"));
+  backup_with(&a, &repo).unwrap();
+  let clean = repo.head_commit();
+  put_old_paths(&repo);
+  // A restore commits its merged library, which has no old paths.
+  assert!(pull(&a, &repo).pushed);
+  assert_no_old_paths(&repo);
+
+  // A computer whose base is the commit with the paths, as a sync with an earlier version
+  // left it.
+  let old = repo.files_at(&repo.parent_of(&repo.head_commit()).unwrap(), "");
+  let library = commit_files(&repo, old, &[], "Backup from an old app");
+  assert_ne!(library, clean);
+  let mut state = read_state(&a).unwrap();
+  state.last_synced_commit = Some(library);
+  state.base_files = repo.files_at(&repo.head_commit(), "");
+  state.base_library = Some(library_at_head(&repo));
+  write_state(&a, &state).unwrap();
+  assert!(status(&a).unwrap().changes.is_empty());
+
+  assert_eq!(backup_with(&a, &repo).unwrap().result, BackupResult::Pushed);
+  assert_no_old_paths(&repo);
+  let commits = repo.commit_count();
+  assert_eq!(
+    backup_with(&a, &repo).unwrap().result,
+    BackupResult::UpToDate
+  );
+  assert_eq!(repo.commit_count(), commits);
+}

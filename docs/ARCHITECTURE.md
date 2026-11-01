@@ -165,7 +165,9 @@ hash, timestamps and `scope`; a local source, skill `folder` / `zip` and instruc
 id, time of the last backup). `scope` is `"shared"` or `{ "device": "<device-id>" }`; every
 item is shared for now. No absolute path is written. A restore keeps the local path of an
 item whose local source has the same kind; a new item gets the kind without a path. A
-`library.json` written with paths is read, and the next backup writes it without them. The lock files stay the source of
+`library.json` written with paths is read without them (also the base, deferred and
+incoming items of the sync state), so no path is carried or written again; the next backup,
+restore commit or migration writes it without them, also when nothing else changed. The lock files stay the source of
 truth: a backup exports a snapshot and commits it on top of the branch, a restore merges the
 branch, or an earlier commit, back into the hub and lock files.
 
