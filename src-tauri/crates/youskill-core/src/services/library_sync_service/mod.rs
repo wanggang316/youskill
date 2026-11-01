@@ -469,6 +469,10 @@ pub struct SyncStatus {
   pub last_pull_at: Option<String>,
   /// Whether this computer has backed up or pulled at least once.
   pub has_synced: bool,
+  /// The last synced commit holds a version 1 library: the next backup or restore asks to
+  /// migrate the repository, unless another device migrated it already.
+  #[serde(default)]
+  pub legacy_base: bool,
   /// Changes on this computer since the last sync.
   pub changes: Vec<LibraryChange>,
   /// Skills left out of the backup (a file over 50 MB, a missing hub copy).
@@ -1461,6 +1465,7 @@ pub fn status(env: &Env) -> Result<SyncStatus, String> {
       last_backup_at: None,
       last_pull_at: None,
       has_synced: false,
+      legacy_base: false,
       changes: Vec::new(),
       skipped: Vec::new(),
       library_empty,
@@ -1482,6 +1487,7 @@ pub fn status(env: &Env) -> Result<SyncStatus, String> {
     last_backup_at: state.last_backup_at.clone(),
     last_pull_at: state.last_pull_at.clone(),
     has_synced: state.last_synced_commit.is_some(),
+    legacy_base: state.last_synced_commit.is_some() && base.library.version < LIBRARY_VERSION,
     changes: local_changes(&base, &snapshot, &device),
     skipped: snapshot.skipped,
     library_empty,

@@ -207,6 +207,10 @@
       const next = afterMigrate;
       afterMigrate = null;
       if (next) await next();
+      // With nothing more to back up or restore, the migration is the news.
+      if (dialog === null && notice?.tone !== "error" && notice?.tone !== "success") {
+        notice = { tone: "success", text: $t("settings.sync.migrated") };
+      }
     });
 
   const backup = () => run("backup", runBackup);
@@ -408,6 +412,7 @@
         ? $t("settings.sync.remoteAhead", { count: incoming })
         : $t("settings.sync.remoteUpToDate");
     }
+    if (current.legacyBase) return $t("settings.sync.legacyBase");
     return current.lastPullAt
       ? $t("settings.sync.lastPull", { time: formatTime(current.lastPullAt) })
       : $t("settings.sync.notChecked");

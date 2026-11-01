@@ -31,6 +31,7 @@ const translations: Record<string, Dictionary> = {
       "Only this computer forgets the repository. The repository and your library are not changed.",
     "settings.sync.thisComputer": "This computer",
     "settings.sync.localChanges": "{count} changes not backed up",
+    "settings.sync.localChanges_one": "1 change not backed up",
     "settings.sync.viewChanges": "View changes",
     "settings.sync.notBackedUp": "Not backed up yet",
     "settings.sync.allBackedUp": "Everything is backed up",
@@ -39,10 +40,13 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.backingUp": "Backing up...",
     "settings.sync.remote": "GitHub",
     "settings.sync.remoteAhead": "{count} new changes from other computers",
+    "settings.sync.remoteAhead_one": "1 new change from other computers",
     "settings.sync.remoteUpToDate": "No new changes",
     "settings.sync.remoteEmpty": "The repository has no backup yet",
     "settings.sync.lastPull": "Last pull {time}",
     "settings.sync.notChecked": "Not checked",
+    "settings.sync.legacyBase":
+      "The repository may still use the format of an older YouSkill. The next backup or restore asks to update it.",
     "settings.sync.pull": "Restore...",
     "settings.sync.emptyLibraryHint":
       "This computer's library is empty. Restore to bring it from GitHub.",
@@ -56,6 +60,7 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.change.removed": "Removed",
     "settings.sync.skipped": "Not backed up (a file over 50 MB or a missing library copy): {names}",
     "settings.sync.backupPushed": "Backed up {count} changes.",
+    "settings.sync.backupPushed_one": "Backed up 1 change.",
     "settings.sync.backupPushedIncoming":
       "Backed up {count} changes. {incoming} changes from other computers are kept for the next restore.",
     "settings.sync.backupUpToDate": "Nothing to back up.",
@@ -71,7 +76,7 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.migrateWarning":
       "Other computers must update YouSkill before they can back up or restore again.",
     "settings.sync.confirmMigrate": "Update repository",
-    "settings.sync.migrated": "The repository uses the new format.",
+    "settings.sync.migrated": "The repository is updated to the new format.",
     "settings.sync.pullUpToDate": "Already up to date.",
     "settings.sync.pendingTitle": "To do on this computer",
     "settings.sync.pendingSummary": "{count} install changes for the agents on this computer",
@@ -84,6 +89,7 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.applySelected": "Apply {count}",
     "settings.sync.applying": "Applying...",
     "settings.sync.pendingApplied": "Applied {count} changes.",
+    "settings.sync.pendingApplied_one": "Applied 1 change.",
     "settings.sync.connectedChooseHint":
       "The repository and this computer both have a library. Choose how to combine them.",
     "settings.sync.remoteHasLibrary": "The repository holds a library from another computer",
@@ -768,6 +774,8 @@ const translations: Record<string, Dictionary> = {
     "settings.sync.remoteEmpty": "仓库里还没有备份",
     "settings.sync.lastPull": "上次拉取 {time}",
     "settings.sync.notChecked": "尚未检查",
+    "settings.sync.legacyBase":
+      "仓库可能还在使用旧版 YouSkill 的格式，下次备份或恢复时会提示更新。",
     "settings.sync.pull": "恢复...",
     "settings.sync.emptyLibraryHint": "这台电脑的中心库是空的，点「恢复」从 GitHub 恢复。",
     "settings.sync.localChangesTitle": "这台电脑的改动",
@@ -793,7 +801,7 @@ const translations: Record<string, Dictionary> = {
       "该仓库使用旧版 YouSkill 的格式。更新后所有条目保持为共享条目，这台电脑的安装记录移到它自己的设备文件中，只产生一次提交。",
     "settings.sync.migrateWarning": "其他电脑需要先更新 YouSkill，才能再次备份或恢复。",
     "settings.sync.confirmMigrate": "更新仓库",
-    "settings.sync.migrated": "仓库已使用新格式。",
+    "settings.sync.migrated": "仓库已更新为新格式。",
     "settings.sync.pullUpToDate": "已是最新。",
     "settings.sync.pendingTitle": "这台电脑待处理",
     "settings.sync.pendingSummary": "本机 Agent 有 {count} 项安装变化",
@@ -1439,7 +1447,9 @@ export const t = derived(settings, ($settings) => {
   const language = $settings.language || "en";
   const dict = translations[language] || translations.en;
   return (key: string, params: Record<string, string | number> = {}) => {
-    const template = dict[key] || translations.en[key] || key;
+    // `<key>_one` is the singular form for `count` 1, in languages that have one.
+    const singular = params.count === 1 ? dict[`${key}_one`] : undefined;
+    const template = singular || dict[key] || translations.en[key] || key;
     return template.replace(/\{(\w+)\}/g, (_, name) =>
       params[name] === undefined ? "" : String(params[name])
     );

@@ -196,7 +196,8 @@ becomes the base, as after a backup on a moved head: changes another device made
 base become incoming items; with an item changed on both sides the base stays. A computer whose base is a version 1 commit
 reads it as version 2 with every item shared and no installs, reads its custom agents from
 the repository, and adds its device file with its next backup. Releases up to 0.10.0 refuse a
-`library.json` above version 1.
+`library.json` above version 1. `status` reports `legacyBase` while the base is a version 1
+commit, so Settings says that the next backup or restore may ask for the migration.
 
 Restore is two calls. `plan_restore(mode, target)` compares each item of this device (a hub
 skill by id, an instruction template by id, a custom agent by id) in three states: base, local snapshot and the

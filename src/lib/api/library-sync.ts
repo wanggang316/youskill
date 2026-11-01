@@ -26,6 +26,8 @@ export interface SyncStatus {
   lastPullAt?: string;
   /** This computer has backed up or pulled at least once. */
   hasSynced: boolean;
+  /** The last sync was with a version 1 repository; the next backup or restore may ask to migrate it. */
+  legacyBase: boolean;
   /** Changes on this computer since the last sync. */
   changes: LibraryChange[];
   /** Skills left out of the backup (a file over 50 MB, a missing hub copy). */
