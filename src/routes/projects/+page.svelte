@@ -52,12 +52,15 @@
     type UserWorkspace,
   } from "$lib/api/user-projects";
   import { listMemoryFiles, type MemoryFile } from "$lib/api/agent-apps";
+  import { listScopeInstructionFiles, type AgentFileView } from "$lib/api/instructions";
   import { resolveAgents } from "$lib/agents";
   import { buildScopeEntries, parentDir, scopeKey, type ScopeEntry } from "$lib/scopes";
 
   let busy = $state(false);
   let actionError = $state("");
   let memoryFiles = $state<MemoryFile[]>([]);
+  /** Agent file views of the selected scope, keyed by scope, for its in-place file detail. */
+  let scopeFiles = $state<{ key: string; files: AgentFileView[] }>({ key: "", files: [] });
 
   const location = $derived(getAppLocation(page.url));
   // The user scope is the home directory, shown like a project folder.
@@ -89,7 +92,10 @@
       return skill ? { kind: "skill" as const, key: `skill:${skill.id}`, skill } : null;
     }
     if (location.instructionFile) {
-      const file = $instructionFiles.find((item) => item.path === location.instructionFile);
+      // Only a file of the selected scope opens; the global list leaves out unregistered
+      // projects, and a file of another project must not show under this one.
+      const files = scopeFiles.key === selected.key ? scopeFiles.files : [];
+      const file = files.find((item) => item.path === location.instructionFile);
       return file ? { kind: "file" as const, key: `file:${file.path}`, file } : null;
     }
     if (location.instruction) {
@@ -149,6 +155,24 @@
     listMemoryFiles(ref.scope, ref.projectPath)
       .then((files) => {
         if (current) memoryFiles = files;
+      })
+      .catch((error) => console.error(error));
+    return () => {
+      current = false;
+    };
+  });
+
+  // Reloaded with the global instruction store too, which every file or template action
+  // refreshes, so templates and hashes stay current.
+  $effect(() => {
+    const entry = selected;
+    void $instructionFiles;
+    if (!entry) return;
+    const { key, ref } = entry;
+    let current = true;
+    listScopeInstructionFiles(ref.scope, ref.projectPath)
+      .then((files) => {
+        if (current) scopeFiles = { key, files };
       })
       .catch((error) => console.error(error));
     return () => {
