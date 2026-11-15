@@ -1,8 +1,8 @@
 use crate::config::load_config;
 use crate::models::{
-  AgentFileView, DetectedInstruction, InstallMode, InstallRequest, InstructionActionResult,
-  InstructionImportItem, InstructionImportOutcome, InstructionView, SkillDiff, SyncAction,
-  UninstallRequest,
+  AgentFileView, DetectedInstruction, InstallMode, InstallRequest, InstallScope,
+  InstructionActionResult, InstructionImportItem, InstructionImportOutcome, InstructionView,
+  SkillDiff, SyncAction, UninstallRequest,
 };
 use crate::services::env::Env;
 use crate::services::instruction_service;
@@ -69,6 +69,18 @@ pub async fn list_instruction_files() -> Result<Vec<AgentFileView>, String> {
   let env = Env::current()?;
   blocking("list_instruction_files", move || {
     instruction_service::list_instruction_files(&env)
+  })
+  .await
+}
+
+#[tauri::command]
+pub async fn list_scope_instruction_files(
+  scope: InstallScope,
+  project_path: Option<String>,
+) -> Result<Vec<AgentFileView>, String> {
+  let env = Env::current()?;
+  blocking("list_scope_instruction_files", move || {
+    instruction_service::list_scope_instruction_files(&env, scope, project_path.as_deref())
   })
   .await
 }
