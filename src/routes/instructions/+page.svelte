@@ -2,31 +2,17 @@
   import { onMount } from "svelte";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
-  import { confirm } from "@tauri-apps/plugin-dialog";
   import InstructionList from "$lib/components/instructions/InstructionList.svelte";
   import SplitView from "$lib/components/SplitView.svelte";
-  import InstructionDetail from "$lib/components/instructions/InstructionDetail.svelte";
-  import InstructionFileDetail from "$lib/components/instructions/InstructionFileDetail.svelte";
-  import type { TargetAction } from "$lib/components/library/DriftPanel.svelte";
-  import RemoveSkillModal from "$lib/components/RemoveSkillModal.svelte";
+  import InstructionDetailContainer from "$lib/components/instructions/InstructionDetailContainer.svelte";
+  import InstructionFileDetailContainer from "$lib/components/instructions/InstructionFileDetailContainer.svelte";
   import { t } from "$lib/i18n";
   import {
     buildInstructionsHref,
     getAppLocation,
     type LibraryFilter,
   } from "$lib/navigation/app-shell";
-  import type { InstallScope, InstallView, SyncAction } from "$lib/api/hub";
-  import {
-    installInstruction,
-    removeInstruction,
-    syncInstruction,
-    uninstallInstruction,
-    type AgentFileView,
-    type InstructionView,
-  } from "$lib/api/instructions";
-  import { openInFileManager } from "$lib/api/skills";
-  import { homePath } from "$lib/stores/env";
-  import { agentsById } from "$lib/stores/hub";
+  import type { AgentFileView, InstructionView } from "$lib/api/instructions";
   import {
     instructionFiles,
     instructions,
@@ -34,19 +20,9 @@
     instructionsLoading,
     refreshInstructions,
   } from "$lib/stores/instructions";
-  import {
-    openImportInstructionModal,
-    openInstallModal,
-    openLocationPickerModal,
-    performInstructionAction,
-  } from "$lib/stores/modals";
-  import { userProjects } from "$lib/stores/user-projects";
-  import { baseName } from "$lib/scopes";
+  import { openImportInstructionModal } from "$lib/stores/modals";
 
   let search = $state("");
-  let busy = $state(false);
-  let actionError = $state("");
-  let removeModalOpen = $state(false);
 
   const location = $derived(getAppLocation(page.url));
   const selectedId = $derived(location.instruction);
@@ -112,140 +88,11 @@
   }
 
   function selectTemplate(id: string) {
-    actionError = "";
     navigate({ id, file: null });
   }
 
   function selectFile(path: string) {
-    actionError = "";
     navigate({ id: null, file: path });
-  }
-
-  async function runAction(work: () => Promise<unknown>) {
-    if (busy) return;
-    busy = true;
-    actionError = "";
-    try {
-      await work();
-    } catch (error) {
-      actionError = String(error);
-    } finally {
-      busy = false;
-      await refreshInstructions().catch(console.error);
-    }
-  }
-
-  function handleInstall(scope: InstallScope, projectPath: string | null, lockScope = false) {
-    if (!selected) return;
-    openInstallModal([selected.id], { scope, projectPath, lockScope, kind: "instruction" });
-  }
-
-  /** Uninstall from every agent of one location, after confirming. */
-  function handleUninstallLocation(
-    scope: InstallScope,
-    projectPath: string | null,
-    installs: InstallView[]
-  ) {
-    const item = selected;
-    if (!item || installs.length === 0) return;
-    const id = item.id;
-    const paths = installs.map((install) => install.path);
-    const location =
-      scope === "user"
-        ? $t("scope.user")
-        : ($userProjects.find((project) => project.path === projectPath)?.name ??
-          baseName(projectPath ?? ""));
-    void runAction(async () => {
-      const confirmed = await confirm(
-        $t("locationPicker.uninstallConfirm", { name: item.name, location }),
-        { title: $t("scope.uninstall"), kind: "warning" }
-      );
-      if (!confirmed) return;
-      const result = await performInstructionAction((force) =>
-        uninstallInstruction({ name: id, targets: [], paths, force })
-      );
-      if (!result.applied && result.blockers.length > 0) {
-        actionError = result.blockers.join("\n");
-      }
-    });
-  }
-
-  function handleTargetAction(install: InstallView, action: TargetAction) {
-    const item = selected;
-    if (!item) return;
-    const name = item.id;
-    void runAction(async () => {
-      let result;
-      switch (action) {
-        case "reinstall":
-          if (install.mode === "symlink") {
-            const targets = install.agentIds.map((agentId) => ({
-              scope: install.scope,
-              projectPath: install.projectPath ?? null,
-              agentId,
-            }));
-            result = await performInstructionAction((force) =>
-              installInstruction({ name, targets, mode: "symlink", force })
-            );
-            break;
-          }
-          result = await performInstructionAction((force) =>
-            syncInstruction(name, { kind: "push_targets", targets: [install.path], force })
-          );
-          break;
-        case "push":
-          result = await performInstructionAction((force) =>
-            syncInstruction(name, { kind: "push_targets", targets: [install.path], force })
-          );
-          break;
-        case "adopt":
-          result = await performInstructionAction((force) =>
-            syncInstruction(name, { kind: "adopt_target", path: install.path, force })
-          );
-          break;
-      }
-      if (result && !result.applied && result.blockers.length > 0) {
-        actionError = result.blockers.join("\n");
-      }
-    });
-  }
-
-  function withForce(action: SyncAction, force: boolean): SyncAction {
-    return action.kind === "accept_hub" ? action : { ...action, force };
-  }
-
-  function handleSync(action: SyncAction) {
-    const item = selected;
-    if (!item) return;
-    const id = item.id;
-    void runAction(async () => {
-      const result = await performInstructionAction((force) =>
-        syncInstruction(id, withForce(action, force))
-      );
-      if (!result.applied && result.blockers.length > 0) {
-        actionError = result.blockers.join("\n");
-      }
-    });
-  }
-
-  function reveal(path: string) {
-    openInFileManager(path).catch((error) => (actionError = String(error)));
-  }
-
-  /** Suggested template name for a promoted file: the project (or the user) and the file. */
-  function promoteName(file: AgentFileView): string {
-    const where = file.scope === "user" ? $t("scope.user") : baseName(file.projectPath ?? "");
-    return `${where} ${file.fileName.replace(/\.[^.]+$/, "")}`;
-  }
-
-  async function handleRemove(removeInstalls: boolean) {
-    if (!selected) return;
-    await removeInstruction(selected.id, removeInstalls);
-  }
-
-  async function handleRemoved() {
-    await refreshInstructions();
-    navigate({ id: null, file: null });
   }
 </script>
 
@@ -271,37 +118,14 @@
     <div class="surface-panel grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)]">
       {#if selected}
         {#key selected.id}
-          <InstructionDetail
+          <InstructionDetailContainer
             instruction={selected}
-            projects={$userProjects}
-            agents={$agentsById}
-            homePath={$homePath}
-            {busy}
-            {actionError}
-            onInstall={handleInstall}
-            onUninstallLocation={handleUninstallLocation}
-            onManageLocations={() => openLocationPickerModal(selected.id, "instruction")}
-            onTargetAction={handleTargetAction}
-            onSync={handleSync}
-            onRemove={() => (removeModalOpen = true)}
-            onOpenFile={() => reveal(selected.hubPath)}
+            onRemoved={() => navigate({ id: null, file: null })}
           />
         {/key}
       {:else if selectedFile}
         {#key selectedFile.path}
-          <InstructionFileDetail
-            file={selectedFile}
-            agents={$agentsById}
-            {busy}
-            {actionError}
-            onOpenTemplate={selectTemplate}
-            onPromote={() =>
-              openImportInstructionModal({
-                paths: [selectedFile.path],
-                name: promoteName(selectedFile),
-              })}
-            onOpenFile={() => reveal(selectedFile.path)}
-          />
+          <InstructionFileDetailContainer file={selectedFile} onOpenTemplate={selectTemplate} />
         {/key}
       {:else}
         <div class="flex min-h-0 flex-col">
@@ -316,12 +140,3 @@
     </div>
   </SplitView>
 </section>
-
-<RemoveSkillModal
-  bind:open={removeModalOpen}
-  name={selected?.name ?? ""}
-  installCount={selected?.installs.length ?? 0}
-  kind="instruction"
-  remove={handleRemove}
-  onRemoved={handleRemoved}
-/>

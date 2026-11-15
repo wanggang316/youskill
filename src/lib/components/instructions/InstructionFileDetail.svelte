@@ -1,6 +1,6 @@
 <script lang="ts">
   import { untrack } from "svelte";
-  import { FolderOpen, LayoutTemplate } from "@lucide/svelte";
+  import { ChevronLeft, FolderOpen, LayoutTemplate } from "@lucide/svelte";
   import AgentBadge from "$lib/components/AgentBadge.svelte";
   import ReferenceMarker from "$lib/components/ReferenceMarker.svelte";
   import SymlinkMarker from "$lib/components/SymlinkMarker.svelte";
@@ -25,6 +25,7 @@
     onOpenTemplate,
     onPromote,
     onOpenFile,
+    onBack,
   }: {
     file: AgentFileView;
     agents: Map<string, AgentInfo>;
@@ -34,6 +35,8 @@
     /** Import this file as a new template that it then belongs to. */
     onPromote: () => void;
     onOpenFile: () => void;
+    /** Shown in an in-place detail: return to the page's own view. */
+    onBack?: () => void;
   } = $props();
 
   let content = $state("");
@@ -73,6 +76,16 @@
     data-window-drag-region
   >
     <div class="flex min-w-0 items-center gap-2">
+      {#if onBack}
+        <IconButton
+          variant="outline"
+          onclick={onBack}
+          title={$t("header.back")}
+          class="h-8 w-8 shrink-0 p-0"
+        >
+          <ChevronLeft size={16} />
+        </IconButton>
+      {/if}
       <h2 class="text-base-content truncate font-mono text-[1rem] font-semibold tracking-[-0.02em]">
         {file.fileName}
       </h2>
