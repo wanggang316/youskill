@@ -5,13 +5,11 @@
   import ScopeList from "$lib/components/scopes/ScopeList.svelte";
   import SplitView from "$lib/components/SplitView.svelte";
   import ScopeDetail, { type ScopeSkillAction } from "$lib/components/scopes/ScopeDetail.svelte";
+  import SkillDetailContainer from "$lib/components/library/SkillDetailContainer.svelte";
+  import InstructionDetailContainer from "$lib/components/instructions/InstructionDetailContainer.svelte";
+  import InstructionFileDetailContainer from "$lib/components/instructions/InstructionFileDetailContainer.svelte";
   import { t } from "$lib/i18n";
-  import {
-    buildInstructionsHref,
-    buildLibraryHref,
-    buildScopeHref,
-    getAppLocation,
-  } from "$lib/navigation/app-shell";
+  import { buildScopeHref, getAppLocation, type ScopeItem } from "$lib/navigation/app-shell";
   import {
     openInFileManager,
     scopedInstalls,
@@ -29,7 +27,7 @@
     refreshHub,
     skillLabel,
   } from "$lib/stores/hub";
-  import { instructions } from "$lib/stores/instructions";
+  import { instructionFiles, instructions } from "$lib/stores/instructions";
   import {
     openDiffModal,
     openImportModal,
@@ -79,6 +77,38 @@
   const selected = $derived<ScopeEntry | null>(
     entries.find((entry) => entry.key === selectedKey) ?? null
   );
+
+  /**
+   * The item of the selected scope shown as an in-place detail, from the URL. A skill shows
+   * only while it is installed in this scope.
+   */
+  const detail = $derived.by(() => {
+    if (!selected) return null;
+    if (location.skill) {
+      const skill = selected.skills.find((item) => item.id === location.skill);
+      return skill ? { kind: "skill" as const, key: `skill:${skill.id}`, skill } : null;
+    }
+    if (location.instructionFile) {
+      const file = $instructionFiles.find((item) => item.path === location.instructionFile);
+      return file ? { kind: "file" as const, key: `file:${file.path}`, file } : null;
+    }
+    if (location.instruction) {
+      const instruction = $instructions.find((item) => item.id === location.instruction);
+      return instruction
+        ? { kind: "instruction" as const, key: `instruction:${instruction.id}`, instruction }
+        : null;
+    }
+    return null;
+  });
+  const detailKey = $derived(
+    location.skill
+      ? `skill:${location.skill}`
+      : location.instructionFile
+        ? `file:${location.instructionFile}`
+        : location.instruction
+          ? `instruction:${location.instruction}`
+          : null
+  );
   const availableAgents = $derived.by(() => {
     const entry = selected;
     if (!entry) return [];
@@ -93,6 +123,19 @@
         ? Boolean(agent.project_path)
         : Boolean(agent.global_path);
     });
+  });
+
+  // Close the detail once its item is gone: the skill or its install here was removed. An
+  // item that was never shown may still be loading, so its URL stays.
+  let shownDetailKey: string | null = null;
+  $effect(() => {
+    const key = detailKey;
+    if (detail) {
+      shownDetailKey = detail.key;
+    } else if (key && key === shownDetailKey) {
+      shownDetailKey = null;
+      closeDetail({ replace: true });
+    }
   });
 
   // The instruction files of the selected scope, refreshed whenever it changes.
@@ -201,6 +244,28 @@
   function handleSelect(entry: ScopeEntry) {
     actionError = "";
     goto(buildScopeHref(entry.ref), { replaceState: true, keepFocus: true, noScroll: true });
+  }
+
+  /** Open an item of the selected scope in place; the project list stays. */
+  function openDetail(item: ScopeItem, options: { replace?: boolean } = {}) {
+    const entry = selected;
+    if (!entry) return;
+    goto(buildScopeHref(entry.ref, item), {
+      replaceState: options.replace ?? false,
+      keepFocus: true,
+      noScroll: true,
+    });
+  }
+
+  /** Back to the project detail; it stays mounted under the item detail, so its scroll stays. */
+  function closeDetail(options: { replace?: boolean } = {}) {
+    const entry = selected;
+    if (!entry) return;
+    goto(buildScopeHref(entry.ref), {
+      replaceState: options.replace ?? false,
+      keepFocus: true,
+      noScroll: true,
+    });
   }
 
   function handleOpenDir() {
@@ -357,29 +422,60 @@
     <div class="surface-panel grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)]">
       {#if selected}
         {#key selected.key}
-          <ScopeDetail
-            entry={selected}
-            agents={$agentsById}
-            {availableAgents}
-            {memoryFiles}
-            {libraryNames}
-            {busy}
-            {actionError}
-            onOpenDir={handleOpenDir}
-            onForgetProject={() => handleForgetProject(selected)}
-            onScan={() =>
-              openImportModal({
-                tab: "folder",
-                folder: selected.kind === "project" ? selected.path : null,
-              })}
-            onAddSkills={() => openSkillPickerModal(selected.ref)}
-            onAddAgent={handleAddAgent}
-            onRemoveAgents={handleRemoveAgents}
-            onOpenMemory={(file) => goto(buildInstructionsHref({ file: file.path }))}
-            onOpenSkill={(id) => goto(buildLibraryHref({ skill: id }))}
-            onSkillAction={handleSkillAction}
-          />
+          <div
+            class="col-start-1 row-start-1 grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)]"
+            class:invisible={detail !== null}
+            inert={detail !== null}
+          >
+            <ScopeDetail
+              entry={selected}
+              agents={$agentsById}
+              {availableAgents}
+              {memoryFiles}
+              {libraryNames}
+              {busy}
+              {actionError}
+              onOpenDir={handleOpenDir}
+              onForgetProject={() => handleForgetProject(selected)}
+              onScan={() =>
+                openImportModal({
+                  tab: "folder",
+                  folder: selected.kind === "project" ? selected.path : null,
+                })}
+              onAddSkills={() => openSkillPickerModal(selected.ref)}
+              onAddAgent={handleAddAgent}
+              onRemoveAgents={handleRemoveAgents}
+              onOpenMemory={(file) => openDetail({ file: file.path })}
+              onOpenSkill={(id) => openDetail({ skill: id })}
+              onSkillAction={handleSkillAction}
+            />
+          </div>
         {/key}
+        {#if detail}
+          <div class="col-start-1 row-start-1 grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)]">
+            {#key detail.key}
+              {#if detail.kind === "skill"}
+                <SkillDetailContainer
+                  skill={detail.skill}
+                  onBack={() => closeDetail()}
+                  onRemoved={() => closeDetail({ replace: true })}
+                />
+              {:else if detail.kind === "file"}
+                <InstructionFileDetailContainer
+                  file={detail.file}
+                  onBack={() => closeDetail()}
+                  onOpenTemplate={(id) => openDetail({ instruction: id }, { replace: true })}
+                />
+              {:else}
+                <InstructionDetailContainer
+                  instruction={detail.instruction}
+                  onBack={() => closeDetail()}
+                  onRemoved={() => closeDetail({ replace: true })}
+                />
+              {/if}
+            {/key}
+          </div>
+        {/if}
       {:else}
         <div class="flex min-h-0 flex-col">
           <header class="h-12 flex-none" data-window-drag-region></header>
