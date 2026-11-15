@@ -203,6 +203,17 @@ export async function listInstructionFiles(): Promise<AgentFileView[]> {
   return apiCall<AgentFileView[]>("list_instruction_files");
 }
 
+/** The agent files of one scope, also of a project that is not registered. */
+export async function listScopeInstructionFiles(
+  scope: InstallScope,
+  projectPath?: string | null
+): Promise<AgentFileView[]> {
+  return apiCall<AgentFileView[]>("list_scope_instruction_files", {
+    scope,
+    projectPath: projectPath ?? null,
+  });
+}
+
 export async function readInstructionFile(path: string): Promise<string> {
   return apiCall<string>("read_instruction_file", { path });
 }
