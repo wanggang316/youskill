@@ -1,5 +1,13 @@
 <script lang="ts">
-  import { ChevronLeft, ExternalLink, FolderOpen, Loader2, Plus, RefreshCw, Trash2 } from "@lucide/svelte";
+  import {
+    ChevronLeft,
+    ExternalLink,
+    FolderOpen,
+    Loader2,
+    Plus,
+    RefreshCw,
+    Trash2,
+  } from "@lucide/svelte";
   import { open as openExternal } from "@tauri-apps/plugin-shell";
   import IconButton from "$lib/components/ui/IconButton.svelte";
   import PrimaryActionButton from "$lib/components/ui/PrimaryActionButton.svelte";
