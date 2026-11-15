@@ -283,9 +283,9 @@
 
   /** Back to the project detail; it stays mounted under the item detail, so its scroll stays. */
   function closeDetail(options: { replace?: boolean } = {}) {
-    const entry = selected;
-    if (!entry) return;
-    goto(buildScopeHref(entry.ref), {
+    // The last install of an unregistered project removes the project too; then no scope
+    // is left to return to, and the item must still leave the URL.
+    goto(buildScopeHref(selected?.ref), {
       replaceState: options.replace ?? false,
       keepFocus: true,
       noScroll: true,
