@@ -13,6 +13,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The Library status and source filters are now one funnel button to the right of the search field. Its menu has a Status group and a Source group, each with a checkmark on the selected option, and stays open so you can set both. The button is highlighted while either filter is not All ([#115](https://github.com/wanggang316/youskill/issues/115)).
+
 ### Fixed
 
 ### Removed
