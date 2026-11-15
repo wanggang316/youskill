@@ -11,9 +11,12 @@ export type AppLocation = {
   activeKey: SidebarActiveKey;
   /** Selected skill in the library (`?skill=`). */
   skill: string | null;
-  /** Selected template on the instructions page (`?id=`). */
+  /**
+   * Selected template: `?id=` on the instructions page, `?instruction=` in the in-place
+   * detail of the projects page.
+   */
   instruction: string | null;
-  /** Selected agent file on the instructions page (`?file=`). */
+  /** Selected agent file on the instructions or projects page (`?file=`). */
   instructionFile: string | null;
   /** Selected install scope on the projects page (`?scope=user` or `?project=<path>`). */
   scope: ScopeRef | null;
@@ -83,7 +86,7 @@ export const getAppLocation = (url: URL): AppLocation => {
   return {
     activeKey,
     skill: url.searchParams.get("skill") || null,
-    instruction: url.searchParams.get("id") || null,
+    instruction: url.searchParams.get(activeKey === "projects" ? "instruction" : "id") || null,
     instructionFile: url.searchParams.get("file") || null,
     scope,
     filter: parseLibraryFilter(url.searchParams.get("filter")),
@@ -114,11 +117,19 @@ export const buildInstructionsHref = (
   return query ? `/instructions?${query}` : "/instructions";
 };
 
-/** The projects page, optionally with one scope selected. */
-export const buildScopeHref = (scope?: ScopeRef | null): string => {
+/** An item of a scope shown as an in-place detail on the projects page. */
+export type ScopeItem = { skill: string } | { file: string } | { instruction: string };
+
+/** The projects page, optionally with one scope selected and one of its items open. */
+export const buildScopeHref = (scope?: ScopeRef | null, item?: ScopeItem | null): string => {
   if (!scope) return "/projects";
-  if (scope.scope === "user") return "/projects?scope=user";
-  return `/projects?project=${encodeURIComponent(scope.projectPath ?? "")}`;
+  const base =
+    scope.scope === "user"
+      ? "/projects?scope=user"
+      : `/projects?project=${encodeURIComponent(scope.projectPath ?? "")}`;
+  if (!item) return base;
+  const [key, value] = Object.entries(item)[0];
+  return `${base}&${key}=${encodeURIComponent(value)}`;
 };
 
 /** The market page, optionally with one marketplace skill open in the content panel. */

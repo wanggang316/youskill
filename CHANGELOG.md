@@ -11,6 +11,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- On the Projects page, a click on a hub skill or an instruction file opens its detail in place, with a Back button. The project list stays visible. The detail has the same actions as on the Library and Instructions pages, and the URL keeps the view across reload and back/forward ([#116](https://github.com/wanggang316/youskill/issues/116)).
+
 ### Changed
 
 - The Library status and source filters are now one funnel button to the right of the search field. Its menu has a Status group and a Source group, each with a checkmark on the selected option, and stays open so you can set both. The button is highlighted while either filter is not All ([#115](https://github.com/wanggang316/youskill/issues/115)).

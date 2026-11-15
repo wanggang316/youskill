@@ -63,6 +63,12 @@ _Avoid_: Quick Open, command palette
 A narrowing of the list on the current page only, such as the Library source filter.
 _Avoid_: Search
 
+**In-place detail**:
+The detail of an item shown in the content panel of the current page, with a Back button, in
+place of a jump to the page that owns the item. The marketplace skill detail and the Projects
+page item detail are in-place details (see `docs/decisions/0008-project-in-place-detail.md`).
+_Avoid_: Secondary page, sub-page, drill-down
+
 ### Markdown preview
 
 **Link preview**:

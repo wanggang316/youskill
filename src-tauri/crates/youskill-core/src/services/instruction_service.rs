@@ -1397,8 +1397,10 @@ pub fn diff_instruction(env: &Env, name: &str, path: &str) -> Result<SkillDiff, 
 // Agent files
 // ---------------------------------------------------------------------------
 
-/// Every instruction file that exists at an agent location: user level and each registered
-/// project whose folder exists. Keyed by path; agents that read the same file are merged.
+/// Every instruction file that exists at an agent location: user level, each registered
+/// project, and each unregistered project that a skill install points to (the Projects
+/// page lists those too), whose folder exists. Keyed by path; agents that read the same
+/// file are merged.
 fn agent_files(env: &Env) -> Vec<(PathBuf, AgentRootMatch)> {
   let mut found: Vec<(PathBuf, AgentRootMatch)> = Vec::new();
   let mut add = |path: PathBuf, location: AgentRootMatch| {
@@ -1427,8 +1429,30 @@ fn agent_files(env: &Env) -> Vec<(PathBuf, AgentRootMatch)> {
       }
     }
   }
-  for project in &env.projects {
-    let root = Path::new(&project.path);
+  let mut projects: Vec<(String, bool)> = env
+    .projects
+    .iter()
+    .map(|project| (project.path.clone(), true))
+    .collect();
+  let skill_lock = lock_service::read_lock_file(&env.lock_path).unwrap_or_default();
+  for install in skill_lock
+    .skills
+    .values()
+    .flat_map(|record| &record.installs)
+  {
+    let Some(project_path) = install.project_path.as_ref() else {
+      continue;
+    };
+    if install.scope == InstallScope::Project
+      && !projects
+        .iter()
+        .any(|(known, _)| same_path(Path::new(known), Path::new(project_path)))
+    {
+      projects.push((project_path.clone(), false));
+    }
+  }
+  for (project_path, registered) in projects {
+    let root = Path::new(&project_path);
     if !root.is_dir() {
       continue;
     }
@@ -1439,9 +1463,9 @@ fn agent_files(env: &Env) -> Vec<(PathBuf, AgentRootMatch)> {
             path,
             AgentRootMatch {
               scope: InstallScope::Project,
-              project_path: Some(project.path.clone()),
+              project_path: Some(project_path.clone()),
               agent_ids: vec![app.id.clone()],
-              registered_project: true,
+              registered_project: registered,
             },
           );
         }
@@ -1460,9 +1484,44 @@ fn linked_template(env: &Env, link: &Path) -> Option<String> {
   library_name(&resolved).filter(|id| is_id(id))
 }
 
-/// The agent files that exist, each with the template it belongs to (by install record,
-/// or by pointing into the library) and how it compares to that template.
+/// The agent files of the user level and the registered projects, each with the template it
+/// belongs to (by install record, or by pointing into the library) and how it compares to
+/// that template.
 pub fn list_instruction_files(env: &Env) -> Result<Vec<AgentFileView>, String> {
+  let files = agent_files(env)
+    .into_iter()
+    .filter(|(_, location)| location.scope == InstallScope::User || location.registered_project)
+    .collect();
+  agent_file_views(env, files)
+}
+
+/// The agent files of one scope, also of a project that is not registered. The Projects
+/// page opens them in place.
+pub fn list_scope_instruction_files(
+  env: &Env,
+  scope: InstallScope,
+  project_path: Option<&str>,
+) -> Result<Vec<AgentFileView>, String> {
+  let files = agent_files(env)
+    .into_iter()
+    .filter(|(_, location)| {
+      location.scope == scope
+        && match (scope, project_path, location.project_path.as_deref()) {
+          (InstallScope::User, _, _) => true,
+          (InstallScope::Project, Some(wanted), Some(known)) => {
+            same_path(Path::new(known), Path::new(wanted))
+          },
+          _ => false,
+        }
+    })
+    .collect();
+  agent_file_views(env, files)
+}
+
+fn agent_file_views(
+  env: &Env,
+  files: Vec<(PathBuf, AgentRootMatch)>,
+) -> Result<Vec<AgentFileView>, String> {
   let lock = read_lock(env)?;
   let hub_hashes: BTreeMap<String, String> = lock
     .instructions
@@ -1473,7 +1532,7 @@ pub fn list_instruction_files(env: &Env) -> Result<Vec<AgentFileView>, String> {
         .map(|hash| (id.clone(), hash))
     })
     .collect();
-  let mut files: Vec<AgentFileView> = agent_files(env)
+  let mut files: Vec<AgentFileView> = files
     .into_iter()
     .map(|(path, location)| {
       let recorded = lock.instructions.iter().find_map(|(id, record)| {
@@ -2546,5 +2605,77 @@ mod tests {
       .find(|file| file.path == path_to_string(&agents))
       .unwrap();
     assert!(proj_file.template.is_none());
+  }
+
+  /// A project that only skill installs point to: listed on the Projects page, so its files
+  /// can be opened there, but not on the Instructions page.
+  fn record_skill_install(env: &Env, project: &Path) {
+    let mut lock = crate::models::LockFile::default();
+    lock.skills.insert(
+      "demo".to_string(),
+      crate::models::SkillRecord {
+        name: "demo".to_string(),
+        source: Default::default(),
+        hash: "h".to_string(),
+        imported_at: String::new(),
+        updated_at: String::new(),
+        installs: vec![InstallRecord {
+          scope: InstallScope::Project,
+          project_path: Some(path_to_string(project)),
+          path: path_to_string(&project.join(".agents/skills/demo")),
+          mode: InstallMode::Copy,
+          hash: "h".to_string(),
+          installed_at: String::new(),
+          agent_ids: vec!["agents".to_string()],
+        }],
+      },
+    );
+    lock_service::write_lock_file(&env.lock_path, &lock).unwrap();
+  }
+
+  #[test]
+  fn scope_files_cover_one_scope_and_unregistered_projects() {
+    let tmp = tempfile::tempdir().unwrap();
+    let env = env(tmp.path());
+    let project = tmp.path().join("proj");
+    let other = tmp.path().join("other");
+    write(&env.home.join(".claude/CLAUDE.md"), "# Claude\n");
+    write(&project.join("AGENTS.md"), "# Proj\n");
+    write(&other.join("CLAUDE.md"), "# Other\n");
+    record_skill_install(&env, &other);
+
+    let user = list_scope_instruction_files(&env, InstallScope::User, None).unwrap();
+    assert_eq!(user.len(), 1);
+    assert_eq!(user[0].scope, InstallScope::User);
+
+    let registered =
+      list_scope_instruction_files(&env, InstallScope::Project, Some(&path_to_string(&project)))
+        .unwrap();
+    assert_eq!(registered.len(), 1);
+    assert_eq!(
+      registered[0].path,
+      path_to_string(&project.join("AGENTS.md"))
+    );
+
+    let other_path = path_to_string(&other.join("CLAUDE.md"));
+    let unregistered =
+      list_scope_instruction_files(&env, InstallScope::Project, Some(&path_to_string(&other)))
+        .unwrap();
+    assert_eq!(unregistered.len(), 1);
+    assert_eq!(unregistered[0].path, other_path);
+    assert_eq!(unregistered[0].agent_ids, vec!["claude-code"]);
+
+    // Its file can be read and edited in place.
+    assert_eq!(
+      read_instruction_file(&env, &other_path).unwrap(),
+      "# Other\n"
+    );
+    write_instruction_file(&env, &other_path, "# Other edited").unwrap();
+    assert_eq!(read(&other.join("CLAUDE.md")), "# Other edited\n");
+
+    // The Instructions page list stays on the user level and registered projects.
+    let all = list_instruction_files(&env).unwrap();
+    assert_eq!(all.len(), 2);
+    assert!(all.iter().all(|file| file.path != other_path));
   }
 }
