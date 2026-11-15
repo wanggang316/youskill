@@ -3,11 +3,11 @@
   import { Folder, Loader2, RefreshCw, ScanSearch, Search, Zap } from "@lucide/svelte";
   import GithubAvatar from "$lib/components/library/GithubAvatar.svelte";
   import GroupActionsMenu from "$lib/components/library/GroupActionsMenu.svelte";
+  import LibraryFilterMenu from "$lib/components/library/LibraryFilterMenu.svelte";
   import CollapsibleGroup from "$lib/components/ui/CollapsibleGroup.svelte";
   import type { MenuItem } from "$lib/components/ui/menu";
   import IconButton from "$lib/components/ui/IconButton.svelte";
   import PrimaryActionButton from "$lib/components/ui/PrimaryActionButton.svelte";
-  import SelectField from "$lib/components/ui/SelectField.svelte";
   import { t } from "$lib/i18n";
   import type { HubSkillView } from "$lib/api/hub";
   import { groupLibrarySkills, type LibraryGroup } from "$lib/library-groups";
@@ -77,8 +77,6 @@
       onSelect: () => onRepositoryAction(group, action),
     }));
 
-  const filters: LibraryFilter[] = ["all", "changed", "uninstalled"];
-  const sources: LibrarySource[] = ["all", "local", "github", "none"];
   /**
    * Placeholder groups shown while the library loads: label width, then name and description
    * widths in percent per row. Keep in sync with the boot skeleton in app.html.
@@ -182,8 +180,8 @@
     </div>
   </header>
 
-  <div class="space-y-2 px-3 pb-2.5">
-    <div class="relative">
+  <div class="flex items-center gap-1.5 px-3 pb-2.5">
+    <div class="relative min-w-0 flex-1">
       <Search class="text-base-content-subtle absolute top-1/2 left-3 -translate-y-1/2" size={14} />
       <input
         class="border-base-300 bg-base-100 text-base-content placeholder:text-base-content-subtle focus:border-base-300 h-8 w-full rounded-xl border pr-3 pl-8 text-[13px] focus:outline-none"
@@ -191,28 +189,7 @@
         bind:value={search}
       />
     </div>
-    <div class="flex items-center gap-1.5">
-      <SelectField
-        value={filter}
-        className="min-w-0 flex-1"
-        selectClassName="h-8 text-[12px]"
-        onchange={(event) => onFilterChange(event.currentTarget.value as LibraryFilter)}
-      >
-        {#each filters as item}
-          <option value={item}>{$t(`library.filter.${item}`)}</option>
-        {/each}
-      </SelectField>
-      <SelectField
-        value={source}
-        className="min-w-0 flex-1"
-        selectClassName="h-8 text-[12px]"
-        onchange={(event) => onSourceChange(event.currentTarget.value as LibrarySource)}
-      >
-        {#each sources as item}
-          <option value={item}>{$t(`library.source.${item}`)}</option>
-        {/each}
-      </SelectField>
-    </div>
+    <LibraryFilterMenu {filter} {source} {onFilterChange} {onSourceChange} />
   </div>
 
   <div
