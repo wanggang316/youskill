@@ -82,8 +82,7 @@ export const getAppLocation = (url: URL): AppLocation => {
   return {
     activeKey,
     skill: url.searchParams.get("skill") || null,
-    instruction:
-      url.searchParams.get(activeKey === "projects" ? "instruction" : "id") || null,
+    instruction: url.searchParams.get(activeKey === "projects" ? "instruction" : "id") || null,
     instructionFile: url.searchParams.get("file") || null,
     scope,
     filter: parseLibraryFilter(url.searchParams.get("filter")),
