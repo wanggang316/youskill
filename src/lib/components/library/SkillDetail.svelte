@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { ExternalLink, FolderOpen, Loader2, Plus, RefreshCw, Trash2 } from "@lucide/svelte";
+  import { ChevronLeft, ExternalLink, FolderOpen, Loader2, Plus, RefreshCw, Trash2 } from "@lucide/svelte";
   import { open as openExternal } from "@tauri-apps/plugin-shell";
   import IconButton from "$lib/components/ui/IconButton.svelte";
   import PrimaryActionButton from "$lib/components/ui/PrimaryActionButton.svelte";
@@ -38,6 +38,7 @@
     onRemove,
     onOpenDir,
     onCheckSource,
+    onBack,
   }: {
     skill: HubSkillView;
     projects?: UserProject[];
@@ -58,6 +59,8 @@
     onRemove: () => void;
     onOpenDir: () => void;
     onCheckSource: () => void;
+    /** Shown in an in-place detail: return to the page's own view. */
+    onBack?: () => void;
   } = $props();
 
   let tab = $state<DetailTab>("general");
@@ -76,6 +79,16 @@
     data-window-drag-region
   >
     <div class="flex min-w-0 items-center gap-2">
+      {#if onBack}
+        <IconButton
+          variant="outline"
+          onclick={onBack}
+          title={$t("header.back")}
+          class="h-8 w-8 shrink-0 p-0"
+        >
+          <ChevronLeft size={16} />
+        </IconButton>
+      {/if}
       <h2 class="text-base-content truncate text-[1.05rem] font-semibold tracking-[-0.02em]">
         {skill.name}
       </h2>

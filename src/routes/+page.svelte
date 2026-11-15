@@ -1,12 +1,10 @@
 <script lang="ts">
   import { Info, X } from "@lucide/svelte";
-  import { confirm } from "@tauri-apps/plugin-dialog";
   import { goto } from "$app/navigation";
   import { page } from "$app/state";
   import SkillList from "$lib/components/library/SkillList.svelte";
   import SplitView from "$lib/components/SplitView.svelte";
-  import SkillDetail from "$lib/components/library/SkillDetail.svelte";
-  import type { TargetAction } from "$lib/components/library/DriftPanel.svelte";
+  import SkillDetailContainer from "$lib/components/library/SkillDetailContainer.svelte";
   import RemoveSkillModal from "$lib/components/RemoveSkillModal.svelte";
   import RepositoryUpdateReport from "$lib/components/library/RepositoryUpdateReport.svelte";
   import { t } from "$lib/i18n";
@@ -16,21 +14,8 @@
     type LibraryFilter,
     type LibrarySource,
   } from "$lib/navigation/app-shell";
+  import { removeHubSkill, type HubSkillView, type SkillSource } from "$lib/api";
   import {
-    installSkill,
-    openInFileManager,
-    removeHubSkill,
-    syncSkill,
-    uninstallSkill,
-    type HubSkillView,
-    type InstallScope,
-    type InstallView,
-    type SkillSource,
-    type SyncAction,
-  } from "$lib/api";
-  import {
-    agentsById,
-    checkSourceUpdates,
     hubError,
     hubLoading,
     hubSkills,
@@ -40,14 +25,7 @@
     skillLabel,
     sourceChecking,
   } from "$lib/stores/hub";
-  import { homePath } from "$lib/stores/env";
-  import {
-    openImportModal,
-    openInstallModal,
-    openLocationPickerModal,
-    openScanRootsModal,
-    performAction,
-  } from "$lib/stores/modals";
+  import { openImportModal, openInstallModal, openScanRootsModal } from "$lib/stores/modals";
   import type { LibraryGroup } from "$lib/library-groups";
   import {
     repositoryImportBranch,
@@ -57,12 +35,8 @@
   } from "$lib/repository-actions";
   import { updateRepositoryGroup } from "$lib/stores/repository-update";
   import { showToast } from "$lib/stores/toast";
-  import { userProjects } from "$lib/stores/user-projects";
-  import { baseName } from "$lib/scopes";
 
   let search = $state("");
-  let busy = $state(false);
-  let actionError = $state("");
   let removeModalOpen = $state(false);
   let migrationDismissed = $state(false);
   /** Skills picked with Shift+click for a batch install or removal. */
@@ -146,22 +120,7 @@
   }
 
   function handleSelect(id: string) {
-    actionError = "";
     navigate({ skill: id });
-  }
-
-  async function runAction(work: () => Promise<unknown>) {
-    if (busy) return;
-    busy = true;
-    actionError = "";
-    try {
-      await work();
-    } catch (error) {
-      actionError = String(error);
-    } finally {
-      busy = false;
-      await refreshHub().catch(console.error);
-    }
   }
 
   function handleToggleChecked(id: string) {
@@ -227,113 +186,8 @@
     }
   }
 
-  function handleInstall(scope: InstallScope, projectPath: string | null, lockScope = false) {
-    if (!selectedSkill) return;
-    openInstallModal([selectedSkill.id], { scope, projectPath, lockScope });
-  }
-
-  /** Uninstall from every agent of one location, after confirming. */
-  function handleUninstallLocation(
-    scope: InstallScope,
-    projectPath: string | null,
-    installs: InstallView[]
-  ) {
-    const skill = selectedSkill;
-    if (!skill || installs.length === 0) return;
-    const id = skill.id;
-    const name = $skillLabel(id);
-    const paths = installs.map((install) => install.path);
-    const location =
-      scope === "user"
-        ? $t("scope.user")
-        : ($userProjects.find((project) => project.path === projectPath)?.name ??
-          baseName(projectPath ?? ""));
-    void runAction(async () => {
-      const confirmed = await confirm($t("locationPicker.uninstallConfirm", { name, location }), {
-        title: $t("scope.uninstall"),
-        kind: "warning",
-      });
-      if (!confirmed) return;
-      const result = await performAction((force) =>
-        uninstallSkill({ name: id, targets: [], paths, force })
-      );
-      if (!result.applied && result.blockers.length > 0) {
-        actionError = result.blockers.join("\n");
-      }
-    });
-  }
-
-  function handleTargetAction(install: InstallView, action: TargetAction) {
-    const skill = selectedSkill;
-    if (!skill) return;
-    const name = skill.id;
-    void runAction(async () => {
-      let result;
-      switch (action) {
-        case "reinstall":
-          if (install.mode === "symlink") {
-            const targets = install.agentIds.map((agentId) => ({
-              scope: install.scope,
-              projectPath: install.projectPath ?? null,
-              agentId,
-            }));
-            result = await performAction((force) =>
-              installSkill({ name, targets, mode: "symlink", force })
-            );
-            break;
-          }
-          result = await performAction((force) =>
-            syncSkill(name, { kind: "push_targets", targets: [install.path], force })
-          );
-          break;
-        case "push":
-          result = await performAction((force) =>
-            syncSkill(name, { kind: "push_targets", targets: [install.path], force })
-          );
-          break;
-        case "adopt":
-          result = await performAction((force) =>
-            syncSkill(name, { kind: "adopt_target", path: install.path, force })
-          );
-          break;
-      }
-      if (result && !result.applied && result.blockers.length > 0) {
-        actionError = result.blockers.join("\n");
-      }
-    });
-  }
-
-  function withForce(action: SyncAction, force: boolean): SyncAction {
-    return action.kind === "accept_hub" ? action : { ...action, force };
-  }
-
-  function handleSync(action: SyncAction) {
-    const skill = selectedSkill;
-    if (!skill) return;
-    const name = skill.id;
-    void runAction(async () => {
-      const result = await performAction((force) => syncSkill(name, withForce(action, force)));
-      if (!result.applied && result.blockers.length > 0) {
-        actionError = result.blockers.join("\n");
-      }
-    });
-  }
-
-  function handleOpenDir() {
-    if (!selectedSkill) return;
-    openInFileManager(selectedSkill.hubPath).catch((error) => (actionError = String(error)));
-  }
-
   function handleRefresh() {
     refreshHubAndSources().catch(console.error);
-  }
-
-  function handleCheckSource() {
-    if (!selectedSkill) return;
-    void checkSourceUpdates([selectedSkill.id], { manual: true }).then((updates) => {
-      const failed = updates.find((update) => update.error);
-      if (failed?.error) actionError = failed.error;
-    });
   }
 
   /** Remove every target; on failure keep only the failed ones so a retry skips the rest. */
@@ -426,22 +280,9 @@
     <div class="surface-panel grid min-h-0 min-w-0 grid-rows-[minmax(0,1fr)]">
       {#if selectedSkill}
         {#key selectedSkill.id}
-          <SkillDetail
+          <SkillDetailContainer
             skill={selectedSkill}
-            projects={$userProjects}
-            agents={$agentsById}
-            homePath={$homePath}
-            {busy}
-            checkingSource={$sourceChecking}
-            {actionError}
-            onInstall={handleInstall}
-            onUninstallLocation={handleUninstallLocation}
-            onManageLocations={() => openLocationPickerModal(selectedSkill.id)}
-            onTargetAction={handleTargetAction}
-            onSync={handleSync}
-            onRemove={() => openRemoveModal([selectedSkill.id])}
-            onOpenDir={handleOpenDir}
-            onCheckSource={handleCheckSource}
+            onRemoved={() => dropRemoved([selectedSkill.id])}
           />
         {/key}
       {:else}
