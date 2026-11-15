@@ -21,6 +21,22 @@ test("market skill detail stays on the market page", () => {
   assert.equal(getAppLocation(url).activeKey, "market");
 });
 
+test("library filter options keep All first in each group", async () => {
+  const { LIBRARY_FILTERS, LIBRARY_SOURCES } = await server.ssrLoadModule(
+    "/src/lib/navigation/app-shell.ts"
+  );
+  assert.deepEqual(LIBRARY_FILTERS, ["all", "changed", "uninstalled"]);
+  assert.deepEqual(LIBRARY_SOURCES, ["all", "local", "github", "none"]);
+});
+
+test("library filter button is active when either group is not All", async () => {
+  const { isLibraryFilterActive } = await server.ssrLoadModule("/src/lib/navigation/app-shell.ts");
+  assert.equal(isLibraryFilterActive("all", "all"), false);
+  assert.equal(isLibraryFilterActive("changed", "all"), true);
+  assert.equal(isLibraryFilterActive("all", "github"), true);
+  assert.equal(isLibraryFilterActive("uninstalled", "none"), true);
+});
+
 test("project item detail stays on the projects page", () => {
   const project = { scope: "project", projectPath: "/work/my app" };
   const skillHref = buildScopeHref(project, { skill: "owner/skill" });

@@ -40,8 +40,12 @@ export const SETTINGS_SECTIONS = [
 
 export type SettingsSection = (typeof SETTINGS_SECTIONS)[number];
 
-const LIBRARY_FILTERS: LibraryFilter[] = ["all", "changed", "uninstalled"];
-const LIBRARY_SOURCES: LibrarySource[] = ["all", "local", "github", "none"];
+export const LIBRARY_FILTERS: LibraryFilter[] = ["all", "changed", "uninstalled"];
+export const LIBRARY_SOURCES: LibrarySource[] = ["all", "local", "github", "none"];
+
+/** Whether the library list is narrowed by status or source, apart from search. */
+export const isLibraryFilterActive = (filter: LibraryFilter, source: LibrarySource) =>
+  filter !== "all" || source !== "all";
 
 const isSettingsPath = (pathname: string) =>
   pathname === "/settings" || pathname.startsWith("/settings/");
